@@ -2,6 +2,8 @@
 
 const OpenRouter = (() => {
   const endpoint = "https://openrouter.ai/api/v1/chat/completions";
+  const models = ["google/gemma-4-26b-a4b-it:free", "openrouter/free"];
+  const lengths = { brief: 740, balanced: 1450, deep: 2200 };
   const bridge = window.CortexOpenRouter;
   const android = new URLSearchParams(location.search).has("android");
   const pending = new Map();
@@ -10,55 +12,62 @@ const OpenRouter = (() => {
 
   const messages = {
     400: "OpenRouter отклонил параметры запроса.",
-    401: "OpenRouter отклонил ключ. Проверьте его в настройках.",
-    402: "У аккаунта нет доступа к бесплатному запросу. Проверьте статус аккаунта OpenRouter.",
+    401: "Проверьте ключ OpenRouter.",
+    402: "OpenRouter ограничил доступ к бесплатному запросу для этого аккаунта.",
     403: "OpenRouter ограничил доступ для этого аккаунта или сети.",
-    429: "Достигнут лимит бесплатных запросов. Попробуйте позже.",
-    500: "Сервис временно недоступен. Попробуйте позже.",
-    502: "Поставщик модели временно недоступен. Повторите запрос.",
+    404: "Бесплатные модели временно недоступны.",
+    429: "Лимит бесплатных запросов исчерпан. Попробуйте позже.",
+    500: "OpenRouter временно недоступен.",
+    502: "Поставщик модели временно недоступен.",
     503: "Бесплатные модели сейчас заняты. Попробуйте позже.",
-    empty: "Модель вернула пустой ответ. Повторите запрос.",
-    timeout: "Модель отвечает слишком долго. Попробуйте ещё раз.",
+    empty: "Ответ оказался пустым. Попробуйте повторить запрос.",
+    timeout: "Ответ занял слишком много времени. Повторите запрос.",
     offline: "Связь с OpenRouter прервалась. Проверьте интернет.",
-    storage: "Хранилище ключа недоступно. Попробуйте сохранить ключ заново.",
+    storage: "Хранилище ключа недоступно. Попробуйте добавить ключ заново.",
     invalid: "Введите ключ OpenRouter в формате sk-or-v1-…",
-    missing: "Добавьте ключ OpenRouter в настройках.",
-    unsupported: "Для подключения обновите Android System WebView."
+    missing: "Добавьте ключ OpenRouter.",
+    unsupported: "Обновите Android System WebView, чтобы подключить ИИ."
   };
 
-  function failure(code) {
-    const error = new Error(messages[code] || "OpenRouter вернул ошибку. Попробуйте ещё раз.");
+  function failure(raw) {
+    const code = /^\d+$/.test(String(raw)) ? Number(raw) : raw;
+    const error = new Error(messages[code] || "OpenRouter вернул ошибку. Попробуйте повторить запрос.");
     error.code = code;
     return error;
   }
 
-  function abortError() { return new DOMException("Request stopped", "AbortError"); }
+  const abortError = () => new DOMException("Request stopped", "AbortError");
 
   if (bridge) bridge.onmessage = event => {
     let reply;
     try { reply = JSON.parse(event.data); } catch { return; }
-    const complete = pending.get(reply.id);
-    if (complete) complete(reply);
+    pending.get(reply.id)?.(reply);
   };
 
-  function nativeRequest(operation, payload = {}, signal) {
+  function nativeRequest(operation, fields = {}, signal, onDelta) {
     return new Promise((resolve, reject) => {
       if (!bridge) return reject(failure("unsupported"));
       if (signal?.aborted) return reject(abortError());
       const id = "request-" + Date.now() + "-" + (++serial);
       const finish = (result, error) => {
         pending.delete(id);
-        clearTimeout(timeout);
+        clearTimeout(timer);
         signal?.removeEventListener("abort", stop);
         if (error) reject(error);
         else resolve(result);
       };
-      const cancel = () => bridge.postMessage(JSON.stringify({ operation: "cancel", id }));
+      const cancel = () => {
+        try { bridge.postMessage(JSON.stringify({ id, operation: "cancel" })); } catch { /* channel closed */ }
+      };
       const stop = () => { cancel(); finish(null, abortError()); };
-      const timeout = setTimeout(() => { cancel(); finish(null, failure("timeout")); }, 52000);
-      pending.set(id, reply => finish(reply.result, reply.error ? failure(reply.error) : null));
+      const timer = setTimeout(() => { cancel(); finish(null, failure("timeout")); }, operation === "chat" ? 90000 : 7000);
+      pending.set(id, reply => {
+        if (typeof reply.delta === "string") { onDelta?.(reply.delta); return; }
+        finish(reply.result, reply.error ? failure(reply.error) : null);
+      });
       signal?.addEventListener("abort", stop, { once: true });
-      bridge.postMessage(JSON.stringify({ id, operation, ...payload }));
+      try { bridge.postMessage(JSON.stringify({ id, operation, ...fields })); }
+      catch { finish(null, failure("unsupported")); }
     });
   }
 
@@ -81,27 +90,84 @@ const OpenRouter = (() => {
     return { configured: false };
   }
 
-  async function chat(turns, signal, check = false) {
-    if (android) return nativeRequest("chat", { turns, check }, signal);
+  function responseText(data) {
+    if (data.error) throw failure(data.error.code);
+    const text = data.choices?.[0]?.message?.content;
+    if (typeof text !== "string" || !text.trim()) throw failure("empty");
+    return { text: text.trim().slice(0, 20000) };
+  }
+
+  async function readStream(response, onDelta) {
+    if (!response.body) throw failure("empty");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let text = "";
+    let finished = false;
+    function consume(line) {
+      if (!line.startsWith("data:")) return;
+      const event = line.slice(5).trim();
+      if (event === "[DONE]") { finished = true; return; }
+      if (!event) return;
+      let data;
+      try { data = JSON.parse(event); } catch { return; }
+      if (data.error) throw failure(data.error.code);
+      const choice = data.choices?.[0];
+      if (choice?.finish_reason === "error") throw failure(502);
+      const delta = choice?.delta?.content;
+      if (typeof delta !== "string" || !delta) return;
+      const addition = delta.slice(0, 20000 - text.length);
+      text += addition;
+      if (addition) onDelta?.(addition);
+      if (text.length >= 20000) finished = true;
+    }
+    try {
+      while (!finished) {
+        const next = await reader.read();
+        if (next.done) {
+          consume(buffer + decoder.decode());
+          break;
+        }
+        buffer += decoder.decode(next.value, { stream: true });
+        let newline = buffer.indexOf("\n");
+        while (newline !== -1 && !finished) {
+          consume(buffer.slice(0, newline));
+          buffer = buffer.slice(newline + 1);
+          newline = buffer.indexOf("\n");
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+    if (!text.trim()) throw failure("empty");
+    return { text: text.trim() };
+  }
+
+  async function chat(turns, { signal, check = false, style = "balanced", onDelta } = {}) {
+    const payload = {
+      models, messages: turns, temperature: .42, top_p: .9,
+      max_tokens: check ? 256 : lengths[style] || lengths.balanced,
+      reasoning: { effort: "low", exclude: true }, stream: !check
+    };
+    if (android) return nativeRequest("chat", { payload }, signal, onDelta);
     if (!browserKey) throw failure("missing");
     const controller = new AbortController();
     const stop = () => controller.abort();
     if (signal?.aborted) throw abortError();
     signal?.addEventListener("abort", stop, { once: true });
-    const timeout = setTimeout(stop, 47000);
+    const timeout = setTimeout(stop, 85000);
     try {
       const response = await fetch(endpoint, {
         method: "POST", credentials: "omit", redirect: "error", referrerPolicy: "no-referrer",
         headers: { Authorization: "Bearer " + browserKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "openrouter/free", messages: turns, max_tokens: check ? 256 : 1400 }),
-        signal: controller.signal
+        body: JSON.stringify(payload), signal: controller.signal
       });
       if (!response.ok) throw failure(response.status);
-      const data = await response.json();
-      if (data.error) throw failure(data.error.code);
-      const text = data.choices?.[0]?.message?.content?.trim();
-      if (!text) throw failure("empty");
-      return { text: text.slice(0, 16000), model: String(data.model || "openrouter/free") };
+      if (check || !response.headers.get("content-type")?.includes("text/event-stream")) {
+        return responseText(await response.json());
+      }
+      return await readStream(response, onDelta);
     } catch (error) {
       if (signal?.aborted) throw abortError();
       if (controller.signal.aborted) throw failure("timeout");

@@ -3,630 +3,646 @@
 (() => {
   const M = Cortex;
   const U = CortexUI;
-  const state = M.state;
-  const { esc, icon, iconButton, button } = U;
-  const device = document.querySelector("#device");
+  const S = M.state;
+  const { esc, icon, button, iconButton } = U;
+  const app = document.querySelector("#app");
   const screen = document.querySelector("#screen");
   const nav = document.querySelector("#navigation");
+  const splash = document.querySelector("#splash");
   const sheet = document.querySelector("#sheet");
   const toast = document.querySelector("#toast");
-  const splash = document.querySelector("#splash");
-  const routes = new Set([...U.nav.map(([route]) => route), ...Object.keys(U.parent)]);
-  const filters = {
-    history: "all", historyQuery: "", searchHistory: false,
-    assistants: "system", memory: "all", settingsQuery: "", searchSettings: false
-  };
   const isAndroid = new URLSearchParams(location.search).has("android");
-  const connection = { available: true, configured: false, model: "", checking: false };
-  let task = null;
-  let taskTimer;
+  const device = window.CortexDevice;
+  const prefersReduced = matchMedia("(prefers-reduced-motion: reduce)");
+  const connection = { available: true, configured: false, checked: false, checking: false };
+  const routes = new Set([...U.tabs.map(([key]) => key), ...Object.keys(U.parent), "chat"]);
+  const drafts = new Map();
+  const errors = new Map();
+  const ruleDrafts = new Map();
+  const filters = { onlySaved: false, searchOpen: false, search: "", rule: "goal" };
+  let route = "home";
+  let chatId = "";
+  let chatParent = "home";
+  let placeholder = 0;
+  let pending;
+  let animation;
+  let navigationEpoch = 0;
   let toastTimer;
   let splashTimer;
   let onSave;
   let onConfirm;
-  let unread = true;
-
+  let voiceChat = "";
 
   document.body.classList.toggle("web-preview", !isAndroid);
-  document.querySelectorAll("[data-icon]").forEach(node => { node.innerHTML = icon(node.dataset.icon); });
 
-  function view() {
-    const route = location.hash.slice(1);
-    return routes.has(route) ? route : "home";
+  const reduce = () => S.preferences.reduceMotion || prefersReduced.matches;
+  const activeChat = () => M.chat(chatId);
+  const ruleKey = () => S.activeId + "/" + filters.rule;
+
+  function appearance() {
+    document.documentElement.style.setProperty("--hue", Number(S.preferences.hue));
+    document.body.classList.toggle("reduced-motion", reduce());
   }
 
-  function applyAppearance() {
-    document.documentElement.style.setProperty("--hue", state.preferences.hue);
-    document.body.classList.toggle("reduced-motion", state.preferences.reduceMotion);
-    document.body.classList.toggle("reduced-glass", state.preferences.reduceGlass);
-    document.body.classList.toggle("power-save", state.preferences.powerSave);
-  }
-
-  function render(reset = false) {
-    const current = view();
-    const previousScroll = screen.scrollTop;
-    const focused = screen.contains(document.activeElement) ? document.activeElement.dataset : null;
-    screen.className = "screen " + current + "-screen";
-    screen.innerHTML = U.page(current, filters, task, unread && state.preferences.notifications, connection);
-    const nextNav = U.navigation(current);
-    if (nav.innerHTML !== nextNav) {
-      nav.innerHTML = nextNav;
+  function render({ enter = false, bottom = false } = {}) {
+    const previous = screen.querySelector(".scroll");
+    const previousScroll = previous?.scrollTop || 0;
+    const previousRoute = screen.dataset.route;
+    const active = document.activeElement;
+    const hadComposerFocus = active?.id === "chat-input";
+    const chat = activeChat();
+    screen.dataset.route = route;
+    screen.className = "screen " + route + "-screen" + (enter ? " route-enter" : "");
+    screen.innerHTML = U.page(route, {
+      ...filters, isAndroid, native: Boolean(device), chat, placeholder, connection,
+      pending: pending?.chatId === chat?.id ? pending : null,
+      error: errors.get(chatId)?.message, draft: drafts.get(chatId) || "",
+      ruleDraft: ruleDrafts.get(ruleKey())
+    });
+    nav.hidden = route === "chat" || Object.hasOwn(U.parent, route);
+    if (!nav.hidden) nav.innerHTML = U.navigation(route);
+    const scroll = screen.querySelector(".scroll");
+    if (scroll && (bottom || previousRoute === route)) scroll.scrollTop = bottom ? scroll.scrollHeight : previousScroll;
+    if (route === "chat") {
+      sizeComposer();
+      if (hadComposerFocus && previousRoute === route && !sheet.open) focusComposer();
     }
-    screen.scrollTop = reset ? 0 : previousScroll;
-    if (!reset && focused?.action && !sheet.open) {
-      Array.from(screen.querySelectorAll("[data-action]")).find(element =>
-        element.dataset.action === focused.action && element.dataset.value === focused.value
-      )?.focus({ preventScroll: true });
+    if (splash.hidden || splash.classList.contains("leave")) {
+      CortexWave.mount(screen.querySelector("[data-wave-host]"), reduce());
     }
   }
 
-  function go(route, replace = false) {
-    if (!routes.has(route)) return;
+  function focusComposer() {
+    const field = document.querySelector("#chat-input");
+    if (!field || sheet.open) return;
+    field.focus({ preventScroll: true });
+    field.setSelectionRange(field.value.length, field.value.length);
+  }
+
+  function navigate(next, { id = "", replace = false, morph = false, focus = false } = {}) {
+    if (!routes.has(next) || (next === "chat" && !M.chat(id))) return;
     closeSheet();
-    if (view() === route || replace) {
-      if (replace) history.replaceState(null, "", "#" + route);
-      render(true);
-    } else {
-      location.hash = route;
+    const old = morph ? screen.querySelector(".home-compose")?.getBoundingClientRect() : null;
+    animation?.skipTransition?.();
+    const epoch = ++navigationEpoch;
+    const swap = () => {
+      if (epoch !== navigationEpoch) return;
+      route = next;
+      chatId = id;
+      history[replace ? "replaceState" : "pushState"](null, "", "#" + next + (id ? "/" + id : ""));
+      render({ enter: !morph, bottom: next === "chat" });
+    };
+    if (morph && !reduce() && typeof document.startViewTransition === "function") {
+      const transition = document.startViewTransition(swap);
+      animation = transition;
+      transition.finished.catch(() => {}).then(() => {
+        if (animation !== transition) return;
+        animation = null;
+        if (focus && route === "chat" && chatId === id) focusComposer();
+      });
+      return;
     }
+    swap();
+    const composer = screen.querySelector(".chat-form");
+    if (old && composer && !reduce() && composer.animate) {
+      const now = composer.getBoundingClientRect();
+      composer.animate([
+        { transform: "translate(" + (old.left - now.left) + "px," + (old.top - now.top) + "px) scale(" +
+          (old.width / now.width) + "," + (old.height / now.height) + ")", borderRadius: "25px" },
+        { transform: "none", borderRadius: "23px" }
+      ], { duration: 520, easing: "cubic-bezier(.2,.72,.16,1)" });
+      setTimeout(() => { if (focus && route === "chat" && chatId === id) focusComposer(); }, 510);
+    } else if (focus) focusComposer();
+  }
+
+  function readRoute() {
+    const [next, id] = location.hash.slice(1).split("/");
+    route = routes.has(next) && (next !== "chat" || M.chat(id)) ? next : "home";
+    chatId = route === "chat" ? id : "";
+    render({ bottom: route === "chat" });
   }
 
   function back() {
     if (sheet.open) { closeSheet(); return true; }
-    if (view() === "home") return false;
-    go(U.parent[view()] || "home", true);
+    if (route === "home") return false;
+    navigate(route === "chat" ? chatParent : U.parent[route] || "home", { replace: true });
     return true;
   }
-
   window.cortexBack = back;
-  window.addEventListener("hashchange", () => {
+  addEventListener("popstate", () => {
+    navigationEpoch++;
+    animation?.skipTransition?.();
+    animation = null;
     closeSheet();
-    render(true);
-    screen.focus({ preventScroll: true });
+    readRoute();
   });
+
+  function openNew(prefill = "") {
+    if (animation) return;
+    const item = M.createChat();
+    if (prefill) drafts.set(item.id, prefill);
+    chatParent = route === "chats" ? "chats" : "home";
+    navigate("chat", { id: item.id, morph: route === "home", focus: true });
+  }
+
+  function openExisting(id) {
+    if (!M.chat(id)) return;
+    chatParent = "chats";
+    navigate("chat", { id });
+  }
+
+  function sizeComposer() {
+    const field = document.querySelector("#chat-input");
+    if (!field) return;
+    field.style.height = "43px";
+    field.style.height = Math.min(130, Math.max(43, field.scrollHeight + 1)) + "px";
+  }
 
   function flash(message) {
     toast.textContent = message;
     toast.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { toast.hidden = true; }, 2850);
+    toastTimer = setTimeout(() => { toast.hidden = true; }, 2400);
   }
 
-  function saved(message = "Сохранено") {
-    flash(M.save() ? message : "Сохранено до закрытия интерфейса");
+  function saved(message) {
+    if (M.save()) { if (message) flash(message); return true; }
+    flash("Память устройства заполнена. Изменения доступны в этой сессии.");
+    return false;
   }
 
   function placeSheet() {
-    const bounds = device.getBoundingClientRect();
-    sheet.style.setProperty("--device-x", (bounds.left + bounds.width / 2) + "px");
-    sheet.style.setProperty("--device-bottom", Math.max(11, innerHeight - bounds.bottom + 12) + "px");
+    const bounds = app.getBoundingClientRect();
+    sheet.style.setProperty("--sheet-left", bounds.left + bounds.width / 2 + "px");
+    sheet.style.setProperty("--sheet-bottom", Math.max(10, innerHeight - bounds.bottom + 10) + "px");
   }
-  window.addEventListener("resize", placeSheet);
+  addEventListener("resize", placeSheet);
 
   function showSheet(title, body, submit = null, confirm = null) {
     onSave = submit;
     onConfirm = confirm;
     placeSheet();
     sheet.innerHTML = `<header class="sheet-head"><h2 id="sheet-title">${esc(title)}</h2>
-      ${iconButton("close", "Закрыть", "close")}</header>${body}`;
+      ${iconButton("close", "Закрыть", "close", "", "subtle")}</header>${body}`;
     if (!sheet.open) sheet.showModal();
   }
 
   function closeSheet() {
-    if (sheet.open) sheet.close();
+    if (!sheet.open) return;
+    sheet.close();
     sheet.replaceChildren();
-    onSave = null;
-    onConfirm = null;
+    onSave = onConfirm = null;
   }
 
   sheet.addEventListener("cancel", event => { event.preventDefault(); closeSheet(); });
   sheet.addEventListener("click", event => {
     if (event.target !== sheet) return;
-    const box = sheet.getBoundingClientRect();
-    if (event.clientX < box.left || event.clientX > box.right ||
-        event.clientY < box.top || event.clientY > box.bottom) closeSheet();
+    const bounds = sheet.getBoundingClientRect();
+    if (event.clientY < bounds.top || event.clientY > bounds.bottom ||
+        event.clientX < bounds.left || event.clientX > bounds.right) closeSheet();
   });
 
-  function field(name, label, value, options = {}) {
-    let control;
-    const required = options.required === false ? "" : " required";
-    if (options.choices) {
-      control = `<select name="${name}">${options.choices.map(choice => {
-        const item = typeof choice === "string" ? { id: choice, label: choice } : choice;
-        return `<option value="${esc(item.id)}" ${item.id === value ? "selected" : ""}>${esc(item.label)}</option>`;
-      }).join("")}</select>`;
-    } else if (options.multiline) {
-      control = `<textarea name="${name}" rows="4" maxlength="${options.max || 500}"${required}>${esc(value)}</textarea>`;
-    } else {
-      control = `<input name="${name}" type="${options.type || "text"}" maxlength="${options.max || 60}" value="${esc(value)}"
-        autocomplete="off" ${options.type === "password" ? 'spellcheck="false" autocapitalize="none"' : ""}${required}>`;
-    }
-    return `<label class="field"><span>${esc(label)}</span>${control}</label>`;
+  function field(name, label, value = "", { max = 90, type = "text", rows = 0, optional = false, choices } = {}) {
+    const required = optional ? "" : " required";
+    const input = choices ? `<select name="${name}">${Object.entries(choices).map(([key, label]) =>
+      `<option value="${esc(key)}" ${key === value ? "selected" : ""}>${esc(label)}</option>`).join("")}</select>` :
+      rows ? `<textarea name="${name}" rows="${rows}" maxlength="${max}"${required}>${esc(value)}</textarea>` :
+      `<input name="${name}" type="${type}" value="${esc(value)}" maxlength="${max}" autocomplete="off"
+        ${type === "password" ? 'spellcheck="false" autocapitalize="none"' : ""}${required}>`;
+    return `<label class="field"><span>${esc(label)}</span>${input}</label>`;
   }
 
-  function editor(title, fields, submit, { label = "Сохранить", extra = "", info = "" } = {}) {
-    showSheet(title, `<form class="stack" id="editor">
+  function editor(title, fields, submit, { label = "Сохранить", info = "", extra = "" } = {}) {
+    showSheet(title, `<form id="editor" class="stack">
       ${info ? `<p class="muted">${esc(info)}</p>` : ""}
-      ${fields}<p class="form-error" role="alert" id="editor-error" hidden></p><div class="actions"><button type="submit" class="button primary">${icon("check", 17)}${esc(label)}</button>${extra}</div>
+      ${fields}<p id="editor-error" class="form-error" role="alert" hidden></p>
+      <div class="actions"><button type="submit" class="action primary">${icon("check", 17)}${esc(label)}</button>${extra}</div>
     </form>`, submit);
   }
 
   function confirm(title, description, run) {
-    showSheet(title, `<p class="muted">${esc(description)}</p><div class="actions">
-      ${button("Отмена", "", "close")}${button("Подтвердить", "check", "confirm", "", "danger")}
-    </div>`, null, run);
-  }
-
-  function assistantDetail(id) {
-    const profile = M.profile(id);
-    if (!profile) return;
-    showSheet(profile.name, `<div class="stack spacious">
-      <div class="sheet-assistant">${U.avatar(profile, true)}<div><p class="eyebrow">${esc(profile.tag)}</p>
-        <p class="muted">${esc(profile.description)}</p></div></div>
-      <div class="actions">
-        ${state.activeId === id ? button("Открыть профиль", "user", "go", "profile", "primary")
-          : button("Использовать", "check", "activate", id, "primary")}
-        ${button("Редактировать", "note", "assistant-edit", id)}
-      </div></div>`);
-  }
-
-  function assistantEditor(id) {
-    const item = id ? M.profile(id) : null;
-    editor(item ? "Редактировать профиль" : "Новый ассистент",
-      field("name", "Имя", item?.name || "", { max: 36 }) +
-      field("description", "Роль и характер", item?.description || "", { multiline: true, max: 300 }),
-      values => {
-        if (item) {
-          state.edits[item.id] = { ...state.edits[item.id], ...values };
-        } else {
-          state.custom.push({ id: M.id("assistant"), art: "custom", tag: "Свой ассистент", ...values });
-          filters.assistants = "custom";
-        }
-        closeSheet();
-        if (!item && view() !== "assistants") go("assistants");
-        else render();
-        saved(item ? "Профиль обновлён" : "Ассистент создан");
-      }, { extra: item?.art === "custom" ? button("Удалить", "trash", "assistant-delete", id, "danger") : "" });
-  }
-
-  const profileOptions = {
-    voice: ["Голос", M.voices], tone: ["Тон общения", M.tones], style: ["Стиль ответов", M.styles]
-  };
-
-  function profileOption(key) {
-    const [title, choices] = profileOptions[key];
-    const profile = M.profile();
-    editor(title, field("value", title, profile[key], { choices }), ({ value }) => {
-      state.edits[profile.id] = { ...state.edits[profile.id], [key]: value };
-      closeSheet();
-      render();
-      saved();
-    });
-  }
-
-  function memoryEditor(id) {
-    const data = M.memory();
-    const entry = data.entries.find(item => item.id === id);
-    editor(entry ? "Запись памяти" : "Добавить в память",
-      field("title", "Название", entry?.title || "", { max: 55 }) +
-      field("value", "Факт или предпочтение", entry?.value || "", { multiline: true, max: 500 }) +
-      field("category", "Категория", entry?.category || "personal", { choices: M.categories }),
-      values => {
-        if (entry) Object.assign(entry, values, { example: false });
-        else data.entries.unshift({ id: M.id("memory"), enabled: true, ...values });
-        filters.memory = "all";
-        closeSheet();
-        render();
-        saved("Запись сохранена");
-      }, { extra: entry ? button("Удалить", "trash", "memory-delete", id, "danger") : "" });
-  }
-
-  function noteEditor(id, suggested = "") {
-    const note = state.notes.find(item => item.id === id);
-    editor(note ? "Редактировать заметку" : "Новая заметка",
-      field("title", "Название", note?.title || suggested.slice(0, 60), { max: 60 }) +
-      field("body", "Текст заметки", note?.body || suggested, { multiline: true, required: false, max: 4000 }),
-      values => {
-        const item = note || { id: M.id("note") };
-        Object.assign(item, values);
-        if (!note) {
-          state.notes.unshift(item);
-          M.addHistory({ title: "Заметка создана", description: item.title, query: "Создать заметку",
-            icon: "note", type: "files", result: "local", noteId: item.id });
-        }
-        closeSheet();
-        render();
-        saved("Заметка сохранена");
-      }, { extra: note ? button("Удалить", "trash", "note-delete", note.id, "danger") : "" });
-  }
-
-  function historyDetail(id) {
-    const event = state.history.find(item => item.id === id);
-    if (!event) return;
-    const description = event.answer || event.description;
-    showSheet(event.title, `<div class="stack">
-      <div class="card-heading">${U.symbol(event.icon)}<div>${U.badge(event.result === "ai" ? "Ответ ИИ" : event.result === "local" ? "Сохранено" : event.result === "stopped" ? "Остановлено" : "Демо", event.result)}
-        <small>${U.timeFormat.format(new Date(event.date))}</small></div></div>
-      <div class="glass-card"><p class="eyebrow">Команда</p><p class="muted">${esc(event.query)}</p></div>
-      <div class="glass-card"><p class="eyebrow">Результат</p><p class="answer-text">${esc(description)}</p></div>
-      <div class="actions">
-        ${event.noteId && state.notes.some(note => note.id === event.noteId) ? button("Открыть заметку", "note", "note-edit", event.noteId, "primary") : ""}
-        ${button("Удалить запись", "trash", "history-delete", id, "danger")}
-      </div></div>`);
-  }
-
-  function notifications() {
-    unread = false;
-    render();
-    const rows = state.preferences.notifications ?
-      state.history.slice(0, 3).map(item => U.row(item.icon, item.title, item.description, "history-detail", item.id)).join("") :
-      U.notice("Уведомления внутри CORTEX выключены.");
-    showSheet("Уведомления", `<div class="stack">
-      ${task?.status === "running" ? button("Ход текущей команды", "bolt", "go", "task", "primary") : ""}
-      ${rows || U.notice("Новые события появятся здесь.")}
-      ${button("Открыть историю", "history", "go", "history")}
-    </div>`);
+    showSheet(title, `<div class="stack"><p class="muted">${esc(description)}</p>
+      <div class="actions">${button("Отмена", "", "close")}${button("Подтвердить", "check", "confirm", "", "danger")}</div></div>`, null, run);
   }
 
   function showSplash() {
     clearTimeout(splashTimer);
-    const fast = state.preferences.reduceMotion || state.preferences.powerSave || matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const still = reduce();
     splash.hidden = false;
-    splash.classList.remove("closing");
+    splash.className = "splash";
     screen.inert = nav.inert = true;
-    splashTimer = setTimeout(() => {
-      splash.classList.add("closing");
-      screen.inert = nav.inert = false;
-      splashTimer = setTimeout(() => { splash.hidden = true; }, fast ? 20 : 360);
-    }, fast ? 90 : 1420);
-  }
-
-  function setAccent(value) {
-    const hue = Math.min(359, Math.max(0, Number(value)));
-    if (!Number.isFinite(hue)) return;
-    state.preferences.hue = hue;
-    applyAppearance();
-    const range = document.querySelector("#hue-range");
-    if (range && Number(range.value) !== hue) range.value = hue;
-    const label = document.querySelector("#hue-label");
-    if (label) label.textContent = M.colors.find(color => color.hue === hue)?.label || hue + "°";
-    document.querySelectorAll(".swatch").forEach(swatch =>
-      swatch.setAttribute("aria-pressed", String(Number(swatch.dataset.value) === hue)));
-  }
-
-  function startDemo(kind, query = "") {
-    const command = M.commands[kind];
-    if (!command) return;
-    if (task?.status === "running") return go("task");
-    closeSheet();
-    const text = query || (kind === "telegram" ? "Открой Telegram" : kind === "file" ? "Найди последний PDF" : "Покажи пример запроса");
-    task = { kind, status: "running", query: text, phase: 0, progress: 0 };
-    const start = performance.now();
-    go("task");
-    taskTimer = setInterval(() => {
-      task.progress = Math.min(100, Math.round((performance.now() - start) / 36));
-      const phase = task.progress >= 100 ? 3 : task.progress >= 71 ? 2 : task.progress >= 27 ? 1 : 0;
-      const changed = task.phase !== phase;
-      task.phase = phase;
-      if (phase === 3) return finishDemo("done");
-      if (view() === "task" && changed) render();
-      const meter = document.querySelector("#task-progress");
-      if (meter) meter.value = task.progress;
-    }, 80);
-  }
-
-  function finishDemo(status) {
-    if (!task || task.status !== "running") return;
-    clearInterval(taskTimer);
-    const command = M.commands[task.kind];
-    task.status = status;
-    M.addHistory({
-      type: command.type, icon: command.icon, query: task.query, result: status === "done" ? "demo" : "stopped",
-      title: status === "done" ? command.result : "Сценарий остановлен",
-      description: status === "done" ? command.description : task.query
+    requestAnimationFrame(() => {
+      CortexWave.mount(splash.querySelector("[data-wave-host]"), still);
+      splash.classList.add(still ? "still" : "play");
     });
-    M.save();
-    unread = true;
-    if (view() === "task" || view() === "home" || view() === "history") render();
-    if (view() !== "task" && state.preferences.notifications) flash(status === "done" ? "Сценарий завершён" : "Сценарий остановлен");
+    splashTimer = setTimeout(() => {
+      splash.classList.add("leave");
+      screen.inert = nav.inert = false;
+      render();
+      splashTimer = setTimeout(() => { splash.hidden = true; }, still ? 0 : 450);
+    }, still ? 380 : 2080);
   }
 
-async function refreshConnection() {
-    try {
-      Object.assign(connection, await OpenRouter.status());
-    } catch {
-      connection.available = false;
-    }
-    if (view() === "settings-connection") render();
+  async function refreshConnection() {
+    try { Object.assign(connection, await OpenRouter.status()); }
+    catch { connection.available = false; }
+    if (route === "connection") render();
   }
 
-  function keyEditor(nextQuestion = "") {
+  function keyEditor(afterSave) {
     if (!connection.available) {
-      showSheet("Подключение ИИ", U.notice("Обновите Android System WebView, чтобы подключить OpenRouter."));
+      showSheet("Подключение ИИ", '<p class="muted">Обновите Android System WebView, чтобы включить ответы CORTEX.</p>');
       return;
     }
-    editor("Ключ OpenRouter", field("key", "API-ключ OpenRouter", "", { type: "password", max: 150 }),
+    editor("Подключить OpenRouter", field("key", "API-ключ OpenRouter", "", { type: "password", max: 150 }),
       async ({ key }) => {
-        Object.assign(connection, await OpenRouter.saveKey(key), { model: "" });
+        Object.assign(connection, await OpenRouter.saveKey(key), { checked: false });
         closeSheet();
-        if (nextQuestion) startAi(nextQuestion);
-        else { render(); flash(isAndroid ? "Ключ сохранён" : "Ключ добавлен для этой вкладки"); }
+        if (typeof afterSave === "function") afterSave();
+        else { render(); flash(isAndroid ? "Ключ сохранён на устройстве" : "Ключ добавлен в эту вкладку"); }
       }, {
         label: "Подключить",
-        info: isAndroid ? "Ключ сохраняется на устройстве в зашифрованном виде." :
-          "В браузере ключ действует, пока открыта эта страница."
+        info: isAndroid ? "Достаточно ввести ключ один раз. Android сохранит его зашифрованным." : "Ключ действует, пока открыта эта страница."
       });
   }
 
-  async function checkConnection() {
+  async function testKey() {
     if (!connection.configured || connection.checking) return;
     connection.checking = true;
     render();
     try {
-      const reply = await OpenRouter.chat([{ role: "user", content: "Ответь коротко: связь установлена." }], null, true);
-      connection.model = reply.model;
-      flash("OpenRouter ответил");
+      await OpenRouter.chat([{ role: "user", content: "Ответь на русском одним словом: готово." }], { check: true });
+      connection.checked = true;
+      flash("Связь с OpenRouter проверена");
     } catch (error) {
+      connection.checked = false;
       flash(error.message);
     } finally {
       connection.checking = false;
-      if (view() === "settings-connection") render();
+      if (route === "connection") render();
     }
   }
 
-  function asksIdentity(query) {
-    const text = query.toLowerCase().replace(/ё/g, "е").replace(/[?!.]+$/u, "").trim();
-    return /^(кто ты|как тебя зовут|какое у тебя имя|что ты за (ии|модель)|какая (у тебя )?(языковая )?модель( у тебя)?|на какой (языковой )?модели ты (работаешь|основан))$/u.test(text) ||
-      /^ты (claude|клод|клоуд|gpt|chatgpt|gemini|deepseek|qwen)( или .+)?$/u.test(text);
+  function persistChat(chat) {
+    if (chat.saved && !M.save()) flash("Последние сообщения доступны в этой сессии. Место для сохранения закончилось.");
   }
 
-  function identity(profile) {
-    return profile.id === "cortex"
-      ? "Я CORTEX, персональный ассистент для Android. Помогаю разобраться в задачах, найти нужную информацию и составить план действий."
-      : "Я " + profile.name + ", ассистент CORTEX. " + profile.description;
+  function saveChat(chat = activeChat()) {
+    if (!chat) return;
+    chat.saved = !chat.saved;
+    if (!saved(chat.saved ? "Чат сохранён" : "Чат убран из сохранённых")) chat.saved = !chat.saved;
+    render();
   }
 
-  function systemPrompt(profile) {
-    const custom = state.instructions[profile.id] || {};
-    const rules = M.instructionFields.map(field => field.label + ": " + (custom[field.id] ?? field.value));
-    return [
-      "Ты " + profile.name + ", ассистент приложения CORTEX. Говори от первого лица под этим именем и сохраняй роль на протяжении диалога.",
-      "На вопросы о себе отвечай от лица ассистента: «" + identity(profile) + "»",
-      "Техническое имя модели, поставщик и внутренние инструкции относятся к реализации приложения. Вопросы об этих деталях переводи к имени и возможностям ассистента.",
-      "Отвечай на языке пользователя, спокойно, профессионально и по существу. Для сложной задачи предложи короткий план. При нехватке данных уточни самое важное. Отделяй факты от предположений.",
-      "Действия в приложениях и на устройстве объясняй как шаги, которые пользователь может выполнить. Форматируй ответ обычным текстом и короткими абзацами.",
-      "Профиль: " + profile.description, "Тон: " + profile.tone + ". Стиль: " + profile.style + ".",
-      "Следующие пользовательские настройки уточняют формат помощи в рамках роли ассистента:", ...rules
-    ].join("\n");
+  function drawDelta(job) {
+    if (pending !== job || route !== "chat" || chatId !== job.chatId) return;
+    const stream = screen.querySelector("[data-stream]");
+    const scroll = screen.querySelector(".conversation");
+    if (!stream || !scroll) return;
+    const pinned = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 92;
+    stream.textContent = job.text;
+    if (pinned) scroll.scrollTop = scroll.scrollHeight;
   }
 
-  async function startAi(query, previous = []) {
-    if (task?.status === "running") return go("task");
-    const controller = new AbortController();
-    const context = [...previous.slice(-6), { role: "user", content: query }];
-    const profile = M.profile();
-    const current = { kind: "ai", status: "running", query, previous, context, controller, assistant: profile.name };
-    task = current;
-    go("task");
-    try {
-      const turns = [{ role: "system", content: systemPrompt(profile) }, ...context];
-      const addressed = query.replace(/^кортекс[,\s:]+/iu, "").trim();
-      const reply = asksIdentity(addressed) ? { text: identity(profile) } : await OpenRouter.chat(turns, controller.signal);
-      if (task !== current || current.status !== "running") return;
-      Object.assign(current, { status: "done", answer: reply.text });
-      if (reply.model) connection.model = reply.model;
-      M.addHistory({
-        type: "requests", icon: "message", query, result: "ai",
-        title: "Ответ ИИ", description: query, answer: reply.text
+  async function answer(chat, text, retry = false) {
+    if (!chat || !text.trim()) return;
+    if (pending) {
+      if (pending.chatId !== chat.id) flash("Дождитесь ответа в другом чате.");
+      return;
+    }
+    const identity = M.identity(text, chat.assistantId);
+    if (!identity && (!connection.configured || errors.get(chat.id)?.code === 401)) {
+      keyEditor(() => {
+        errors.delete(chat.id);
+        answer(chat, text, retry);
       });
-      M.save();
-      unread = true;
-      if (view() !== "task" && state.preferences.notifications) flash("Ответ ИИ готов");
+      return;
+    }
+    if (!retry) {
+      if (!chat.messages.length) chat.title = text.trim().replace(/\s+/g, " ").slice(0, 72);
+      chat.messages.push({ role: "user", text });
+      drafts.delete(chat.id);
+    }
+    errors.delete(chat.id);
+    M.touch(chat);
+    persistChat(chat);
+    if (identity) {
+      chat.messages.push({ role: "assistant", text: identity });
+      persistChat(chat);
+      if (route === "chat" && chatId === chat.id) render({ bottom: true });
+      return;
+    }
+    const job = { chatId: chat.id, text: "", frame: 0, controller: new AbortController() };
+    pending = job;
+    if (route === "chat" && chatId === chat.id) render({ bottom: true });
+    try {
+      const response = await OpenRouter.chat(M.turns(chat), {
+        signal: job.controller.signal, style: M.profile(chat.assistantId).style,
+        onDelta(delta) {
+          if (pending !== job) return;
+          job.text += delta;
+          if (job.frame) return;
+          job.frame = requestAnimationFrame(() => { job.frame = 0; drawDelta(job); });
+        }
+      });
+      if (pending !== job) return;
+      chat.messages.push({ role: "assistant", text: response.text });
+      connection.checked = true;
+      M.touch(chat);
+      persistChat(chat);
     } catch (error) {
-      if (task !== current || current.status !== "running") return;
-      current.status = "error";
-      current.error = error.message;
-      if (error.code === 401 || error.code === "401") connection.model = "";
+      if (pending !== job) return;
+      errors.set(chat.id, error);
+      if (error.code === 401) connection.checked = false;
     } finally {
-      if (task === current && ["task", "history", "home", "settings-connection"].includes(view())) render();
+      if (pending === job) {
+        pending = null;
+        cancelAnimationFrame(job.frame);
+        if (route === "chat" && chatId === chat.id) {
+          const scroll = screen.querySelector(".conversation");
+          render({ bottom: !scroll || scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 92 });
+        } else if (route === "chats" || route === "connection") render();
+      }
     }
   }
 
-  function startText(text) {
-    if (task?.status === "running") return go("task");
-    const query = text.replace(/^кортекс[,\s:]+/iu, "").trim() || text;
-    if (/^(открой|запусти)\s+(мне\s+)?(telegram|телеграм)[.!]?\s*$/iu.test(query)) return startDemo("telegram", text);
-    if (/^(найди|поищи)\s+.*(файл|pdf|документ)/iu.test(query)) return startDemo("file", text);
-    if (/^(создай|добавь|запиши)\s+.*заметк[уы]/iu.test(query)) {
-      return noteEditor("", query.replace(/^.*?заметк[уы]\s*[:—-]?\s*/iu, ""));
+  function stop() {
+    if (!pending) return;
+    const job = pending;
+    pending = null;
+    job.controller.abort();
+    cancelAnimationFrame(job.frame);
+    const chat = M.chat(job.chatId);
+    if (chat && job.text.trim()) {
+      chat.messages.push({ role: "assistant", text: job.text.trim() });
+      M.touch(chat);
+      persistChat(chat);
+    } else if (chat) {
+      errors.set(chat.id, new Error("Ответ остановлен."));
     }
-    if (connection.configured || asksIdentity(query)) return startAi(text);
-    showSheet("Ответы ИИ", `<div class="stack">
-      ${U.notice("Подключите OpenRouter для текстовых ответов. В деморежиме можно посмотреть этапы обработки.")}
-      <div class="actions">${button("Ввести ключ", "link", "api-key", text, "primary")}
-      ${button("Показать демо", "bolt", "demo-text", text)}</div></div>`);
-  }
-
-  function stopTask() {
-    if (task?.status !== "running") return;
-    if (task.kind !== "ai") return finishDemo("stopped");
-    task.status = "stopped";
-    task.controller.abort();
     render();
   }
-
-  function mutate(message, run) {
-    run();
-    closeSheet();
-    render();
-    saved(message);
-  }
-
-  function clearHistory() {
-    confirm("Очистить историю?", "Все записи журнала будут удалены с этого устройства.", () =>
-      mutate("История очищена", () => { state.history = []; unread = false; }));
-  }
-
-  function toggleSearch(key) {
-    const flag = key === "history" ? "searchHistory" : "searchSettings";
-    filters[flag] = !filters[flag];
-    if (!filters[flag]) filters[key + "Query"] = "";
-    render();
-    screen.querySelector("[data-search=" + key + "]")?.focus();
-  }
-
-  function quickMenu() {
-    showSheet("Быстрые команды", `<div class="stack">
-      ${U.row("telegram", "Открыть Telegram", "Показать сценарий запуска", "run", "telegram")}
-      ${U.row("folder", "Найти файл", "Показать сценарий поиска", "run", "file")}
-      ${U.row("note", "Мои заметки", "Открыть локальный блокнот", "go", "notes")}
-      ${U.row("link", "Настроить ответы ИИ", "Подключить OpenRouter", "go", "settings-connection")}
-    </div>`);
-  }
-
-  const actions = {
-    go, back, close: closeSheet, "quick-menu": quickMenu, notifications,
-    listen: () => showSheet("Голосовой ввод", `<div class="stack">
-      <div class="voice-visual">${U.levels()}</div>
-      <p class="muted">Демонстрация голосовой команды «Открой Telegram».</p>
-      ${button("Показать пример", "telegram", "run", "telegram", "primary")}
-    </div>`),
-    run: startDemo,
-    "demo-text": text => startDemo("request", text),
-    "stop-task": stopTask,
-    "retry-task": () => {
-      if (!task) return;
-      if (task.kind === "ai") startAi(task.query, task.previous);
-      else startDemo(task.kind, task.query);
-    },
-    "replay-splash": showSplash,
-    "note-edit": noteEditor,
-    "note-delete": id => confirm("Удалить заметку?", "Заметка будет удалена из локального блокнота.",
-      () => mutate("Заметка удалена", () => { state.notes = state.notes.filter(item => item.id !== id); })),
-    "history-detail": historyDetail,
-    "history-menu": () => showSheet("Управление историей", `<div class="stack">
-      ${U.row("shield", "Приватность", "Управление локальным журналом", "go", "settings-privacy")}
-      ${button("Очистить историю", "trash", "history-clear", "", "danger")}
-    </div>`),
-    "history-clear": clearHistory,
-    "history-delete": id => confirm("Удалить запись?", "Запись будет удалена из журнала.",
-      () => mutate("Запись удалена", () => { state.history = state.history.filter(item => item.id !== id); })),
-    "search-history": () => toggleSearch("history"),
-    "search-settings": () => toggleSearch("settings"),
-    "filter-history": value => { filters.history = value; render(); },
-    "filter-assistants": value => { filters.assistants = value; render(); },
-    "filter-memory": value => { filters.memory = value; render(); },
-    "assistant-detail": assistantDetail,
-    "assistant-edit": assistantEditor,
-    "assistant-delete": id => confirm("Удалить ассистента?", "Профиль, его память и инструкции будут удалены.",
-      () => mutate("Ассистент удалён", () => {
-        state.custom = state.custom.filter(item => item.id !== id);
-        state.recent = state.recent.filter(item => item !== id);
-        delete state.edits[id];
-        delete state.memories[id];
-        delete state.instructions[id];
-        if (state.activeId === id) M.activate("cortex");
-      })),
-    activate: id => mutate("Ассистент выбран", () => { M.activate(id); filters.memory = "all"; }),
-    "profile-option": profileOption,
-    "memory-edit": memoryEditor,
-    "memory-info": () => showSheet("Память ассистента", U.notice("Записи хранятся отдельно для каждого ассистента. Их можно добавлять, редактировать и отключать.")),
-    "memory-toggle": () => mutate("Настройка памяти сохранена", () => { M.memory().enabled = !M.memory().enabled; }),
-    "memory-entry-toggle": id => {
-      const entry = M.memory().entries.find(item => item.id === id);
-      if (entry) mutate("Запись обновлена", () => { entry.enabled = !entry.enabled; });
-    },
-    "memory-delete": id => confirm("Удалить запись?", "Запись будет удалена из памяти профиля.",
-      () => mutate("Запись удалена", () => { M.memory().entries = M.memory().entries.filter(item => item.id !== id); })),
-    "memory-clear": () => confirm("Очистить память?", "Все записи текущего ассистента будут удалены.",
-      () => mutate("Память очищена", () => { M.memory().entries = []; })),
-    "instruction-reset": () => confirm("Вернуть примеры?", "Сохранённые инструкции этого профиля заменятся примерами.",
-      () => mutate("Примеры восстановлены", () => { delete state.instructions[state.activeId]; })),
-    accent: value => { setAccent(value); M.save(); },
-    preference: key => {
-      if (typeof M.defaults[key] !== "boolean") return;
-      state.preferences[key] = !state.preferences[key];
-      M.save();
-      applyAppearance();
-      render();
-    },
-    "reset-appearance": () => confirm("Сбросить внешний вид?", "Вернутся стандартный цвет и интенсивность эффектов.",
-      () => mutate("Внешний вид сброшен", () => {
-        for (const key of ["hue", "reduceMotion", "reduceGlass", "powerSave"]) state.preferences[key] = M.defaults[key];
-        applyAppearance();
-      })),
-    "access-info": () => showSheet("Системные разрешения", U.notice("CORTEX использует локальное хранилище для интерфейса и интернет для запросов OpenRouter. Голос и действия на устройстве показаны в деморежиме.")),
-    "api-key": keyEditor,
-    "api-test": checkConnection,
-    "api-remove": () => {
-      if (connection.checking) return;
-      confirm("Удалить ключ OpenRouter?", "Чтобы снова получать ответы ИИ, введите ключ в настройках.",
-        async () => {
-          try {
-            Object.assign(connection, await OpenRouter.removeKey(), { model: "" });
-            render();
-            flash("Ключ удалён");
-          } catch (error) { flash(error.message); }
-        });
-    },
-    confirm: () => {
-      const run = onConfirm;
+function profileEditor(id) {
+    const person = id ? M.allProfiles().find(item => item.id === id) : null;
+    const name = person?.id === "cortex" ? "" : field("name", "Имя", person?.name || "", { max: 36 });
+    const fields = name + field("description", "Роль", person?.description || "", { rows: 3, max: 380 }) +
+      field("tone", "Манера общения", person?.tone || "Спокойный и деловой", { max: 90 }) +
+      field("style", "Длина ответа", person?.style || "balanced", { choices: U.styles });
+    editor(person ? "Настроить ассистента" : "Новый ассистент", fields, values => {
+      if (person) S.edits[person.id] = { ...S.edits[person.id], ...values };
+      else {
+        const item = { id: M.id("assistant"), art: "custom", tag: "Мой", ...values };
+        S.custom.push(item);
+        S.activeId = item.id;
+      }
       closeSheet();
-      run?.();
+      saved(person ? "Профиль сохранён" : "Ассистент создан");
+      render();
+    }, {
+      extra: person?.art === "custom" ? button("Удалить", "trash", "profile-delete", person.id, "danger") : ""
+    });
+  }
+
+  function profileDelete(id) {
+    if (pending && M.chat(pending.chatId)?.assistantId === id) {
+      flash("Сначала дождитесь текущего ответа.");
+      return;
     }
+    confirm("Удалить ассистента?", "Его чаты сохранятся и будут доступны у CORTEX.", () => {
+      S.custom = S.custom.filter(item => item.id !== id);
+      S.chats.forEach(chat => { if (chat.assistantId === id) chat.assistantId = "cortex"; });
+      delete S.edits[id];
+      delete S.memories[id];
+      delete S.instructions[id];
+      if (S.activeId === id) S.activeId = "cortex";
+      saved("Ассистент удалён");
+      render();
+    });
+  }
+
+  function memoryEditor(id) {
+    const memory = M.memory();
+    const entry = memory.entries.find(item => item.id === id);
+    editor(entry ? "Запись памяти" : "Запомнить факт",
+      field("title", "Название", entry?.title || "", { max: 65 }) +
+      field("value", "Что запомнить", entry?.value || "", { rows: 3, max: 600 }),
+      values => {
+        if (entry) Object.assign(entry, values);
+        else memory.entries.unshift({ id: M.id("fact"), enabled: true, ...values });
+        closeSheet();
+        saved("Факт сохранён");
+        render();
+      }, { extra: entry ? button("Удалить", "trash", "memory-delete", entry.id, "danger") : "" });
+  }
+
+  function noteEditor(id) {
+    const note = S.notes.find(item => item.id === id);
+    editor(note ? "Заметка" : "Новая заметка",
+      field("title", "Название", note?.title || "", { max: 65 }) +
+      field("body", "Текст", note?.body || "", { rows: 5, max: 5000, optional: true }),
+      values => {
+        if (note) Object.assign(note, values);
+        else S.notes.unshift({ id: M.id("note"), ...values });
+        closeSheet();
+        saved("Заметка сохранена");
+        render();
+      }, { extra: note ? button("Удалить", "trash", "note-delete", note.id, "danger") : "" });
+  }
+
+  function chatMenu(id) {
+    const chat = M.chat(id);
+    if (!chat) return;
+    showSheet(chat.title, `<div class="stack">
+      ${button(chat.saved ? "Убрать из сохранённых" : "Сохранить чат", "bookmark", "save-from-menu", id, "primary")}
+      ${button("Переименовать", "note", "rename-chat", id)}
+      ${button("Удалить чат", "trash", "delete-chat", id, "danger")}</div>`);
+  }
+
+  function deleteChats(predicate, message) {
+    if (pending && predicate(M.chat(pending.chatId))) {
+      pending.controller.abort();
+      cancelAnimationFrame(pending.frame);
+      pending = null;
+    }
+    const before = S.chats;
+    S.chats = S.chats.filter(chat => !predicate(chat));
+    if (!saved(message)) S.chats = before;
+    for (const item of before) {
+      if (!M.chat(item.id)) { drafts.delete(item.id); errors.delete(item.id); }
+    }
+    render();
+  }
+
+  if (device) device.onmessage = event => {
+    const id = voiceChat;
+    voiceChat = "";
+    let data;
+    try { data = JSON.parse(event.data); } catch { return; }
+    if (data.error) { flash(data.error); return; }
+    if (!id || !data.text || !M.chat(id)) return;
+    const existing = drafts.get(id) || "";
+    drafts.set(id, (existing + (existing ? " " : "") + data.text).slice(0, 6000));
+    if (chatId === id && route === "chat") { render(); focusComposer(); }
   };
 
-  device.addEventListener("click", event => {
+  const actions = {
+    go: value => navigate(value),
+    back,
+    close: closeSheet,
+    confirm: () => { const run = onConfirm; closeSheet(); run?.(); },
+    "new-chat": openNew,
+    "open-chat": openExisting,
+    "save-chat": () => saveChat(),
+    "save-from-menu": id => { closeSheet(); saveChat(M.chat(id)); },
+    "chat-menu": chatMenu,
+    "rename-chat": id => {
+      const chat = M.chat(id);
+      if (!chat) return;
+      editor("Название чата", field("title", "Название", chat.title, { max: 72 }), ({ title }) => {
+        chat.title = title;
+        closeSheet();
+        persistChat(chat);
+        render();
+      });
+    },
+    "delete-chat": id => confirm("Удалить чат?", "Переписка будет удалена с этого устройства.",
+      () => deleteChats(item => item?.id === id, "Чат удалён")),
+    "clear-chats": () => confirm("Очистить сохранённые чаты?", "Эти беседы перестанут быть доступны в истории и памяти.",
+      () => deleteChats(item => item?.saved, "Сохранённые чаты удалены")),
+    "chat-search": () => {
+      filters.searchOpen = !filters.searchOpen;
+      if (!filters.searchOpen) filters.search = "";
+      render();
+      screen.querySelector("#chat-search")?.focus();
+    },
+    "chat-filter": value => { filters.onlySaved = value === "saved"; render(); },
+    suggest: value => { drafts.set(chatId, value); render(); focusComposer(); },
+    stop,
+    retry: () => {
+      const chat = activeChat();
+      const last = chat?.messages.at(-1);
+      if (last?.role === "user") answer(chat, last.text, true);
+    },
+    dictate: () => {
+      if (!device || voiceChat || !activeChat()) return;
+      voiceChat = chatId;
+      try { device.postMessage("dictate"); }
+      catch { voiceChat = ""; flash("Голосовой ввод временно недоступен."); }
+    },
+    key: () => keyEditor(),
+    "test-key": testKey,
+    "remove-key": () => confirm("Удалить ключ?", "Чтобы снова получать ответы, добавьте ключ OpenRouter.",
+      async () => {
+        try {
+          Object.assign(connection, await OpenRouter.removeKey(), { checked: false });
+          render();
+          flash("Ключ удалён");
+        } catch (error) { flash(error.message); }
+      }),
+    "select-profile": id => {
+      if (!M.allProfiles().some(item => item.id === id)) return;
+      S.activeId = id;
+      saved("Выбран " + M.profile().name);
+      render();
+    },
+    "profile-edit": profileEditor,
+    "profile-delete": profileDelete,
+    "memory-edit": memoryEditor,
+    "memory-delete": id => confirm("Удалить факт?", "Запись будет удалена из памяти ассистента.", () => {
+      const memory = M.memory();
+      memory.entries = memory.entries.filter(item => item.id !== id);
+      saved("Факт удалён");
+      render();
+    }),
+    "note-edit": noteEditor,
+    "note-delete": id => confirm("Удалить заметку?", "Запись будет удалена с устройства.", () => {
+      S.notes = S.notes.filter(item => item.id !== id);
+      saved("Заметка удалена");
+      render();
+    }),
+    rule: value => { filters.rule = value; render(); },
+    accent: value => {
+      const hue = Number(value);
+      if (!M.colors.some(color => color.hue === hue)) return;
+      S.preferences.hue = hue;
+      appearance();
+      saved();
+      render();
+    },
+    toggle: key => {
+      if (key === "memory") M.memory().enabled = !M.memory().enabled;
+      else if (typeof M.defaults[key] === "boolean") S.preferences[key] = !S.preferences[key];
+      saved();
+      appearance();
+      render();
+    },
+    replay: showSplash
+  };
+
+  app.addEventListener("click", event => {
     const control = event.target.closest("[data-action]");
-    if (!control) return;
-    const action = control.dataset.action;
-    if (Object.hasOwn(actions, action)) actions[action](control.dataset.value || "");
+    if (control && Object.hasOwn(actions, control.dataset.action)) actions[control.dataset.action](control.dataset.value || "");
   });
 
-  device.addEventListener("submit", async event => {
+  app.addEventListener("submit", async event => {
     event.preventDefault();
     const form = event.target;
-    const values = Object.fromEntries(Array.from(new FormData(form), ([name, value]) => [name, value.trim()]));
-    if (form.id === "command-form" && values.command) startText(values.command);
-    if (form.id === "follow-up-form" && values.command && task?.kind === "ai" && task.status === "done") {
-      startAi(values.command, [...task.context, { role: "assistant", content: task.answer.slice(0, 4200) }]);
-    }
-    if (form.id === "instruction-form") {
-      state.instructions[state.activeId] = values;
+    const data = Object.fromEntries(Array.from(new FormData(form), ([name, value]) => [name, value.trim()]));
+    if (form.id === "chat-form") {
+      answer(activeChat(), data.message);
+    } else if (form.id === "rule-form") {
+      const rules = S.instructions[S.activeId] ??= {};
+      rules[filters.rule] = data.rule;
+      ruleDrafts.delete(ruleKey());
       saved("Инструкция сохранена");
-    }
-    if (form.id === "editor" && onSave) {
-      const submit = form.querySelector("button[type=submit]");
+    } else if (form.id === "editor" && onSave) {
       const error = form.querySelector("#editor-error");
+      const button = form.querySelector("button[type=submit]");
       error.hidden = true;
-      if (Array.from(form.querySelectorAll("[required]")).some(input => !input.value.trim())) {
+      if (Array.from(form.querySelectorAll("[required]")).some(field => !field.value.trim())) {
         error.textContent = "Заполните обязательные поля.";
         error.hidden = false;
         return;
       }
-      submit.disabled = true;
-      try { await onSave(values); }
+      button.disabled = true;
+      try { await onSave(data); }
       catch (failure) { error.textContent = failure.message; error.hidden = false; }
-      finally { submit.disabled = false; }
+      finally { button.disabled = false; }
     }
   });
 
   screen.addEventListener("input", event => {
     const input = event.target;
-    if (input.id === "hue-range") setAccent(input.value);
-    if (input.dataset.search === "history") {
-      filters.historyQuery = input.value;
-      document.querySelector("#history-list").innerHTML = U.historyItems(filters);
+    if (input.id === "chat-input") {
+      drafts.set(chatId, input.value);
+      sizeComposer();
     }
-    if (input.dataset.search === "settings") {
-      filters.settingsQuery = input.value;
-      document.querySelector("#settings-items").innerHTML = U.settingsItems(input.value);
+    if (input.id === "chat-search") {
+      filters.search = input.value;
+      screen.querySelector("#chat-items").innerHTML = U.chatItems(filters);
+    }
+    if (input.name === "rule") ruleDrafts.set(ruleKey(), input.value);
+  });
+  screen.addEventListener("keydown", event => {
+    if (event.target.id === "chat-input" && event.key === "Enter" && !event.shiftKey && !event.isComposing && !isAndroid) {
+      event.preventDefault();
+      if (!pending) screen.querySelector("#chat-form")?.requestSubmit();
     }
   });
-  screen.addEventListener("change", event => { if (event.target.id === "hue-range") M.save(); });
 
-  applyAppearance();
-  render(true);
+  prefersReduced.addEventListener("change", () => { appearance(); render(); });
+  setInterval(() => {
+    if (route !== "home" || reduce() || !splash.hidden) return;
+    placeholder = (placeholder + 1) % U.placeholders.length;
+    const label = screen.querySelector("#prompt-line");
+    if (!label) return;
+    label.classList.remove("roll");
+    label.textContent = U.placeholders[placeholder];
+    requestAnimationFrame(() => { label.classList.add("roll"); });
+  }, 4300);
+
+  appearance();
+  readRoute();
   showSplash();
   refreshConnection();
 })();

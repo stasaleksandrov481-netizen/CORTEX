@@ -11,6 +11,7 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedReader
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.URL
@@ -26,9 +27,10 @@ import javax.net.ssl.HttpsURLConnection
 
 internal class OpenRouterBridge(context: Context) : AutoCloseable {
     private val keys = ApiKeyStorage(context)
-    private val io = Executors.newFixedThreadPool(2)
+    private val io = Executors.newCachedThreadPool()
     private val main = Handler(Looper.getMainLooper())
     private val work = ConcurrentHashMap<String, FutureTask<Unit>>()
+    private val sockets = ConcurrentHashMap<String, HttpsURLConnection>()
 
     fun install(view: WebView, origin: String) {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
@@ -36,18 +38,23 @@ internal class OpenRouterBridge(context: Context) : AutoCloseable {
                 _, message, source, isMainFrame, reply ->
             if (!isMainFrame || source.toString().trimEnd('/') != origin) return@addWebMessageListener
             val raw = message.data ?: return@addWebMessageListener
-            if (raw.length > 45_000) return@addWebMessageListener
+            if (raw.length > 110_000) return@addWebMessageListener
             val request = runCatching { JSONObject(raw) }.getOrNull() ?: return@addWebMessageListener
             val id = request.optString("id")
             if (!REQUEST_ID.matches(id)) return@addWebMessageListener
             if (request.optString("operation") == "cancel") {
-                work.remove(id)?.cancel(true)
+                cancel(id)
                 return@addWebMessageListener
             }
             val job = FutureTask<Unit> {
                 val response = JSONObject().put("id", id)
                 try {
-                    response.put("result", handle(request))
+                    response.put("result", handle(id, request) { delta ->
+                        val event = JSONObject().put("id", id).put("delta", delta)
+                        main.post {
+                            if (work.containsKey(id)) runCatching { reply.postMessage(event.toString()) }
+                        }
+                    })
                 } catch (error: RouterError) {
                     response.put("error", error.code)
                 } catch (_: SocketTimeoutException) {
@@ -65,73 +72,123 @@ internal class OpenRouterBridge(context: Context) : AutoCloseable {
         }
     }
 
-    private fun handle(request: JSONObject): JSONObject = when (request.optString("operation")) {
-        "status" -> JSONObject().put("available", true).put("configured", keys.exists())
-        "save-key" -> {
-            val key = request.optString("key").trim()
-            if (!API_KEY.matches(key)) throw RouterError("invalid")
-            keys.store(key)
-            JSONObject().put("configured", true)
-        }
-        "remove-key" -> {
-            keys.remove()
-            JSONObject().put("configured", false)
-        }
-        "chat" -> {
-            val key = keys.read() ?: throw RouterError("missing")
-            val messages = readTurns(request.optJSONArray("turns"))
-            complete(key, messages, request.optBoolean("check"))
-        }
-        else -> throw RouterError("400")
+    private fun cancel(id: String) {
+        work.remove(id)?.cancel(true)
+        sockets.remove(id)?.let { connection -> io.execute(connection::disconnect) }
     }
 
-    private fun readTurns(turns: JSONArray?): JSONArray {
-        if (turns == null || turns.length() !in 1..13) throw RouterError("400")
-        val output = JSONArray()
+    private fun handle(id: String, request: JSONObject, emit: (String) -> Unit): JSONObject =
+        when (request.optString("operation")) {
+            "status" -> JSONObject().put("available", true).put("configured", keys.exists())
+            "save-key" -> {
+                val key = request.optString("key").trim()
+                if (!API_KEY.matches(key)) throw RouterError("invalid")
+                keys.store(key)
+                JSONObject().put("configured", true)
+            }
+            "remove-key" -> {
+                keys.remove()
+                JSONObject().put("configured", false)
+            }
+            "chat" -> {
+                val key = keys.read() ?: throw RouterError("missing")
+                val payload = request.optJSONObject("payload") ?: throw RouterError("400")
+                complete(id, key, payload, emit)
+            }
+            else -> throw RouterError("400")
+        }
+
+    private fun checkedPayload(request: JSONObject): JSONObject {
+        val turns = request.optJSONArray("messages") ?: throw RouterError("400")
+        if (turns.length() !in 1..29) throw RouterError("400")
+        val messages = JSONArray()
+        var total = 0
         for (index in 0 until turns.length()) {
             val turn = turns.optJSONObject(index) ?: throw RouterError("400")
             val role = turn.optString("role")
             val text = turn.optString("content")
-            if (role !in ROLES || text.isBlank() || text.length > 16_000) throw RouterError("400")
-            output.put(JSONObject().put("role", role).put("content", text))
+            total += text.length
+            if (role !in ROLES || text.isBlank() || total > 51_000) throw RouterError("400")
+            messages.put(JSONObject().put("role", role).put("content", text))
         }
-        return output
+        val models = request.optJSONArray("models") ?: throw RouterError("400")
+        if (models.length() !in 1..2) throw RouterError("400")
+        val routes = JSONArray()
+        for (index in 0 until models.length()) {
+            val model = models.optString(index)
+            if (!FREE_MODEL.matches(model)) throw RouterError("400")
+            routes.put(model)
+        }
+        return JSONObject()
+            .put("models", routes)
+            .put("messages", messages)
+            .put("temperature", 0.42)
+            .put("top_p", 0.9)
+            .put("max_tokens", request.optInt("max_tokens", 1450).coerceIn(128, 2400))
+            .put("reasoning", JSONObject().put("effort", "low").put("exclude", true))
+            .put("stream", request.optBoolean("stream"))
     }
 
-    private fun complete(key: String, messages: JSONArray, check: Boolean): JSONObject {
-        val request = JSONObject()
-            .put("model", "openrouter/free")
-            .put("messages", messages)
-            .put("max_tokens", if (check) 256 else 1400)
+    private fun complete(id: String, key: String, payload: JSONObject, emit: (String) -> Unit): JSONObject {
+        val request = checkedPayload(payload)
         val connection = URL(ENDPOINT).openConnection() as HttpsURLConnection
+        sockets[id] = connection
         try {
+            if (!work.containsKey(id)) throw InterruptedException()
             connection.instanceFollowRedirects = false
-            connection.connectTimeout = 12_000
-            connection.readTimeout = 38_000
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 55_000
             connection.requestMethod = "POST"
             connection.doOutput = true
             connection.setRequestProperty("Authorization", "Bearer $key")
             connection.setRequestProperty("Content-Type", "application/json")
-            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("Accept", if (request.optBoolean("stream")) "text/event-stream" else "application/json")
             connection.outputStream.use { it.write(request.toString().toByteArray(Charsets.UTF_8)) }
             val status = connection.responseCode
             if (status !in 200..299) throw RouterError(status.toString())
-            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val payload = runCatching { JSONObject(body) }.getOrElse { throw RouterError("empty") }
-            payload.optJSONObject("error")?.let { throw RouterError(it.optString("code")) }
-            val message = payload.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
-            val text = if (message != null && !message.isNull("content")) message.optString("content").trim() else ""
+            val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                if (connection.contentType?.contains("text/event-stream") == true) {
+                    readStream(id, reader, emit)
+                } else {
+                    val data = runCatching { JSONObject(reader.readText()) }.getOrElse { throw RouterError("empty") }
+                    data.optJSONObject("error")?.let { throw RouterError(it.optString("code")) }
+                    content(data.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message"))
+                }
+            }.trim()
             if (text.isBlank()) throw RouterError("empty")
-            return JSONObject().put("text", text.take(16_000)).put("model", payload.optString("model", "openrouter/free"))
+            return JSONObject().put("text", text.take(20_000))
         } finally {
+            sockets.remove(id, connection)
             connection.disconnect()
         }
     }
 
+    private fun readStream(id: String, reader: BufferedReader, emit: (String) -> Unit): String {
+        val result = StringBuilder()
+        for (line in reader.lineSequence()) {
+            if (!work.containsKey(id)) throw InterruptedException()
+            if (!line.startsWith("data:")) continue
+            val event = line.substring(5).trim()
+            if (event == "[DONE]") break
+            val data = runCatching { JSONObject(event) }.getOrNull() ?: continue
+            data.optJSONObject("error")?.let { throw RouterError(it.optString("code")) }
+            val choice = data.optJSONArray("choices")?.optJSONObject(0)
+            if (choice?.optString("finish_reason") == "error") throw RouterError("502")
+            val delta = content(choice?.optJSONObject("delta")).take(20_000 - result.length)
+            if (delta.isEmpty()) continue
+            result.append(delta)
+            emit(delta)
+            if (result.length >= 20_000) break
+        }
+        return result.toString()
+    }
+
+    private fun content(message: JSONObject?): String =
+        if (message == null || message.isNull("content")) "" else message.optString("content")
+
     override fun close() {
-        work.values.forEach { it.cancel(true) }
-        work.clear()
-        io.shutdownNow()
+        work.keys.toList().forEach(::cancel)
+        io.shutdown()
     }
 
     private class RouterError(val code: String) : Exception()
@@ -139,6 +196,7 @@ internal class OpenRouterBridge(context: Context) : AutoCloseable {
     private companion object {
         const val ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
         val ROLES = setOf("system", "user", "assistant")
+        val FREE_MODEL = Regex("^(openrouter/free|[a-z0-9._-]+/[a-z0-9._-]+:free)$")
         val API_KEY = Regex("^sk-or-v1-[A-Za-z0-9_-]{24,128}$")
         val REQUEST_ID = Regex("^request-[0-9]{10,16}-[0-9]{1,8}$")
     }

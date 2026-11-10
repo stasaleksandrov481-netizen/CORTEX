@@ -1,27 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 202 184" fill="none">
   <defs>
     <linearGradient id="ribbon" x1="52" y1="14" x2="147" y2="162" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#96FDFF"/><stop offset=".22" stop-color="#09D6F6"/><stop offset=".47" stop-color="#1965E7"/>
-      <stop offset=".68" stop-color="#4724B2"/><stop offset=".89" stop-color="#9B2DDF"/><stop offset="1" stop-color="#F964F4"/>
+      <stop stop-color="#cfebed"/><stop offset=".22" stop-color="#81b6c0"/><stop offset=".47" stop-color="#566b8d"/>
+      <stop offset=".68" stop-color="#474065"/><stop offset=".89" stop-color="#755c8a"/><stop offset="1" stop-color="#b894ba"/>
     </linearGradient>
     <linearGradient id="fold" x1="114" y1="24" x2="33" y2="124" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#68FAFF"/><stop offset=".34" stop-color="#18BAEC"/><stop offset=".67" stop-color="#123974"/>
-      <stop offset="1" stop-color="#15136B"/>
+      <stop stop-color="#bae0e3"/><stop offset=".34" stop-color="#7aa4b2"/><stop offset=".67" stop-color="#2f3b4b"/>
+      <stop offset="1" stop-color="#1f2138"/>
     </linearGradient>
     <linearGradient id="inside" x1="43" y1="68" x2="145" y2="164" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#79FCFF" stop-opacity=".96"/><stop offset=".41" stop-color="#46C1FF" stop-opacity=".08"/>
-      <stop offset=".76" stop-color="#BF6DFF" stop-opacity=".36"/><stop offset="1" stop-color="#FEA4FF"/>
+      <stop stop-color="#c3e5e7" stop-opacity=".96"/><stop offset=".41" stop-color="#94b4c5" stop-opacity=".08"/>
+      <stop offset=".76" stop-color="#a592b8" stop-opacity=".36"/><stop offset="1" stop-color="#d7c2da"/>
     </linearGradient>
     <linearGradient id="base" x1="102" y1="104" x2="165" y2="158" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#5446D8" stop-opacity="0"/><stop offset=".57" stop-color="#9836D1" stop-opacity=".38"/>
-      <stop offset="1" stop-color="#EC5BED" stop-opacity=".85"/>
+      <stop stop-color="#605e85" stop-opacity="0"/><stop offset=".57" stop-color="#765f87" stop-opacity=".38"/>
+      <stop offset="1" stop-color="#ae8bb1" stop-opacity=".85"/>
     </linearGradient>
     <filter id="glow" x="-35%" y="-35%" width="170%" height="170%"><feGaussianBlur stdDeviation="5"/></filter>
     <path id="shape" d="M170 54C166 17 126 7 94 15 58 24 29 49 19 80 8 115 24 146 56 162 86 177 131 179 162 157 177 146 191 123 180 111 170 100 154 110 137 122 117 136 97 149 76 141 54 133 56 103 72 80 93 50 122 34 143 44 154 49 161 65 167 63 170 62 171 58 170 54Z"/>
     <clipPath id="clip"><use href="#shape"/></clipPath>
   </defs>
   <use href="#shape" fill="url(#ribbon)" filter="url(#glow)" opacity=".58"/>
-  <use href="#shape" fill="url(#ribbon)" stroke="#A3F4FF" stroke-opacity=".36" stroke-width=".7"/>
+  <use href="#shape" fill="url(#ribbon)" stroke="#d1e7eb" stroke-opacity=".36" stroke-width=".7"/>
   <g clip-path="url(#clip)">
     <path d="M172 66C149 38 131 31 100 48 65 67 50 99 57 129 50 123 39 107 38 87 37 65 53 46 71 32 110 5 157 11 170 38Z" fill="url(#fold)"/>
     <path d="M30 116C43 158 86 171 122 152 148 138 161 113 181 113L187 142 160 172 70 182 26 152Z" fill="url(#base)"/>

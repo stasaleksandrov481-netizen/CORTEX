@@ -2,6 +2,9 @@
 
 const CortexIcons = (() => {
   const paths = {
+    sendUp: '<path d="M12 20V5m-6 6 6-6 6 6"/>',
+    bookmark: '<path d="M6 4h12v17l-6-4-6 4z"/>',
+    spark: '<path d="M12 2c1 6 4 9 10 10-6 1-9 4-10 10-1-6-4-9-10-10 6-1 9-4 10-10Z"/>',
     home: '<path d="m3 10 9-7 9 7v9a2 2 0 0 1-2 2h-4v-7H9v7H5a2 2 0 0 1-2-2z"/>',
     history: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     layers: '<path d="m12 3 9 5-9 5-9-5zm-9 9 9 5 9-5M3 16l9 5 9-5"/>',
