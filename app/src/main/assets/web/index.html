@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#080c17">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://openrouter.ai; form-action 'none'; base-uri 'none'">
+  <title>CORTEX · AI Control Center</title>
+  <link rel="icon" href="art/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="icons.js"></script>
+  <script defer src="model.js"></script>
+  <script defer src="screens.js"></script>
+  <script defer src="openrouter.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div class="preview-shell">
+    <aside class="brand-stage" aria-hidden="true">
+      <div class="stage-kicker"><i></i> ANDROID / КОНЦЕПТ 01</div>
+      <img class="stage-mark" src="art/mark.svg" alt="">
+      <img class="stage-wordmark" src="art/wordmark.svg" alt="">
+      <p class="stage-caption"><span></span> AI CONTROL CENTER <span></span></p>
+      <p class="stage-intro">Персональный AI-ассистент для Android. Команды, контекст и настройки в одном интерфейсе.</p>
+      <div class="stage-features">
+        <div><span data-icon="wave"></span><p><strong>Центр управления</strong><small>Команды и ход выполнения</small></p></div>
+        <div><span data-icon="layers"></span><p><strong>Ассистенты</strong><small>Профили, память и инструкции</small></p></div>
+        <div><span data-icon="sliders"></span><p><strong>Твой интерфейс</strong><small>Цвет и интенсивность эффектов</small></p></div>
+      </div>
+    </aside>
+
+    <main class="device" id="device" aria-label="CORTEX">
+      <div class="device-status" aria-hidden="true">
+        <span>12:30</span><i></i>
+        <span class="device-signal" data-icon="signal"></span>
+      </div>
+      <div id="screen" class="screen" tabindex="-1"></div>
+      <nav id="navigation" class="navigation" aria-label="Основная навигация"></nav>
+      <div class="device-gesture" aria-hidden="true"><span></span></div>
+
+      <div class="splash" id="splash" role="status" aria-label="Загрузка интерфейса CORTEX">
+        <img class="splash-wave" src="art/wave.svg" alt="">
+        <div class="splash-center">
+          <div class="splash-orbit">
+            <i></i><i></i>
+            <img src="art/mark.svg" alt="">
+          </div>
+          <img class="splash-name" src="art/wordmark.svg" alt="CORTEX">
+          <span class="splash-subtitle">AI CONTROL CENTER</span>
+          <span class="splash-track"><span></span></span>
+          <span class="splash-label">ЗАГРУЖАЮ ИНТЕРФЕЙС</span>
+        </div>
+      </div>
+
+      <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+      <dialog class="sheet" id="sheet" aria-labelledby="sheet-title"></dialog>
+      <noscript>Для работы интерфейса CORTEX включите JavaScript.</noscript>
+    </main>
+  </div>
+</body>
+</html>
