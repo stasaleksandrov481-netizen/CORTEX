@@ -18,6 +18,10 @@ CORTEX использует [Free Models Router](https://openrouter.ai/openroute
 
 На Android ключ сохраняется зашифрованным с помощью Android Keystore. В браузере он действует до перезагрузки или закрытия страницы. Удалить ключ можно в том же разделе. Журнал ответов управляется через **Настройки → Приватность**.
 
+## Скачать APK с GitHub
+
+GitHub Actions собирает тестовый APK при каждом пуше в `main`. Откройте **Actions → Android APK**, выберите успешный запуск и скачайте **CORTEX-debug.apk** из раздела **Artifacts**. Для ручной сборки нажмите **Run workflow** на странице процесса.
+
 ## Собрать Android-проект
 
 Требуются JDK 17–25, Android SDK Platform 36 и Android SDK Build-Tools 36.0.0. Для первого запуска Gradle нужен интернет. Минимальная версия на устройстве — Android 8.0.
