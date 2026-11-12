@@ -2,67 +2,89 @@
 
 const Cortex = (() => {
   const key = "cortex.interface.v2";
-  const oldKey = "cortex.interface.v1";
-  const colors = [
-    { hue: 188, label: "Лёд" }, { hue: 222, label: "Индиго" },
-    { hue: 270, label: "Аметист" }, { hue: 313, label: "Орхидея" },
-    { hue: 34, label: "Янтарь" }, { hue: 161, label: "Мята" }
-  ];
-  const profiles = [
-    { id: "cortex", name: "CORTEX", art: "cortex", tag: "Основной", description: "Спокойный персональный ассистент для серьёзной работы и повседневных задач.", tone: "Спокойный и деловой" },
-    { id: "business", name: "Деловой", art: "business", tag: "Работа", description: "Собирает планы, помогает с текстами и структурирует задачи.", tone: "Деловой и конкретный" },
-    { id: "orbit", name: "Спутник", art: "orbit", tag: "Идеи", description: "Развивает идеи, объясняет сложное и помогает начать.", tone: "Дружелюбный и внимательный" },
-    { id: "night", name: "Ночной", art: "night", tag: "Фокус", description: "Короткие ответы и спокойный ритм.", tone: "Лаконичный", style: "brief" }
-  ];
   const instructionFields = [
-    { id: "goal", label: "Задача ассистента", value: "Помогай разбираться в задачах, находить понятные объяснения и планировать действия." },
-    { id: "reply", label: "Как отвечать", value: "Начинай с сути. Для сложной задачи предложи короткий план и уточни важные детали." },
-    { id: "actions", label: "Действия", value: "Для действий на устройстве объясняй шаги, доступные пользователю." },
-    { id: "confirm", label: "Когда уточнять", value: "Если запрос неоднозначен, задай один вопрос, который сильнее всего меняет ответ." }
+    { id: "goal", label: "Задача", value: "Помогай разбираться в задачах, находить понятные объяснения и планировать действия." },
+    { id: "reply", label: "Ответы", value: "Начинай с сути. Для сложной задачи предложи короткий план и уточни важные детали." },
+    { id: "actions", label: "Действия", value: "Выбирай инструменты Android для запрошенных действий." },
+    { id: "confirm", label: "Уточнения", value: "Если запрос неоднозначен, задай один вопрос, который сильнее всего меняет ответ." }
   ];
+  const styles = { brief: "Кратко", balanced: "Сбалансированно", deep: "Подробно" };
+  const languages = { auto: "Авто", "ru-RU": "Русский", "en-US": "Английский" };
+  const motion = { full: "Полные", balanced: "Сбалансированные", simple: "Упрощённые" };
+  const models = { auto: "Авто", fast: "Быстро", deep: "Подробно" };
   const defaults = {
-    hue: 188, reduceMotion: false, autoSaveChats: false, rememberSaved: true
+    quality: "balanced", reduceMotion: false, autoSaveChats: true, rememberSaved: true,
+    language: "auto", haptics: true, readAloud: false, voiceContinue: true,
+    phoneActions: true, model: "auto", speechSpeed: "1", notifyReplies: false,
+    overlayMode: "off", hideLandscape: true, hotwordEnabled: false, silentWake: false
   };
   const array = input => Array.isArray(input) ? input : [];
+  const object = input => input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const string = (value, limit) => typeof value === "string" ? value.slice(0, limit) : "";
+  const uid = (prefix) => prefix + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
+  const avatarPattern = /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]{1,90000}$/;
+
   function read(name) {
-    try {
-      const data = JSON.parse(localStorage.getItem(name));
-      return data && typeof data === "object" ? data : null;
-    } catch {
-      return null;
-    }
+    try { return object(JSON.parse(localStorage.getItem(name))); }
+    catch { return {}; }
   }
 
-  function id(prefix) {
-    return prefix + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
+  function account(value) {
+    const data = object(value);
+    if (typeof data.id !== "string" || !data.id || data.provider !== "Google") return null;
+    return {
+      id: string(data.id, 200), name: string(data.name, 100), email: string(data.email, 254), provider: "Google",
+      avatar: avatarPattern.test(data.avatar || "") ? data.avatar : ""
+    };
   }
 
   function importHistory(history) {
-    return array(history).filter(item => item.result === "ai" && item.query && item.answer).map(item => ({
-      id: id("chat"), assistantId: "cortex", saved: true, updated: item.date,
+    return array(history).filter(item => item?.result === "ai" && item.query && item.answer).map(item => ({
+      id: uid("chat"), saved: true, updated: item.date,
       title: String(item.query).trim().slice(0, 72),
       messages: [{ role: "user", text: String(item.query) }, { role: "assistant", text: String(item.answer) }]
     }));
   }
 
+  function migrateChat(item) {
+    return {
+      id: string(item.id, 100) || uid("chat"),
+      saved: Boolean(item.saved), pinned: Boolean(item.pinned),
+      updated: string(item.updated, 40) || new Date().toISOString(),
+      title: string(item.title, 72) || "Новый чат",
+      messages: array(item.messages).filter(message => ["user", "assistant"].includes(message?.role) && message.text)
+        .map(({role, text, local}) => ({ role, text: string(text, 20000), ...(local === true && { local: true }) }))
+    };
+  }
+
   const current = read(key);
-  const old = current ? null : read(oldKey);
-  const persisted = current || old || {};
+  const old = Object.keys(current).length ? null : read("cortex.interface.v1");
+  const persisted = old || current;
+  const preferences = { ...defaults };
+  for (const name of Object.keys(defaults)) {
+    if (typeof persisted.preferences?.[name] === typeof defaults[name]) preferences[name] = persisted.preferences[name];
+  }
+  if (persisted.preferences?.powerSave) preferences.reduceMotion = true;
+  if (!Object.hasOwn(motion, preferences.quality)) preferences.quality = defaults.quality;
+  if (!Object.hasOwn(models, preferences.model)) preferences.model = defaults.model;
+  if (!Object.hasOwn(languages, preferences.language)) preferences.language = defaults.language;
+  if (!["always", "wake", "off"].includes(preferences.overlayMode)) preferences.overlayMode = "off";
+  if (!["0.85", "1", "1.15"].includes(preferences.speechSpeed)) preferences.speechSpeed = defaults.speechSpeed;
   const state = {
-    preferences: { ...defaults, hue: persisted.preferences?.hue ?? defaults.hue,
-      reduceMotion: Boolean(persisted.preferences?.reduceMotion || persisted.preferences?.powerSave),
-      ...(current?.preferences || {}) },
-    custom: array(persisted.custom), edits: persisted.edits || {},
-    activeId: persisted.activeId || "cortex",
-    chats: current ? array(current.chats).filter(chat => chat.saved && Array.isArray(chat.messages)) : importHistory(old?.history),
-    memories: persisted.memories || {}, instructions: persisted.instructions || {}, notes: array(persisted.notes)
+    preferences,
+    edits: { cortex: object(persisted.edits?.cortex) },
+    chats: (old ? importHistory(old.history) : array(current.chats))
+      .filter(item => item?.saved && Array.isArray(item.messages)).map(migrateChat),
+    memories: object(persisted.memories),
+    instructions: { ...object(persisted.instructions), cortex: object(persisted.instructions?.cortex) },
+    notes: array(persisted.notes).filter(item => item && typeof item.id === "string"),
+    account: account(persisted.account)
   };
 
   function save() {
     try {
       localStorage.setItem(key, JSON.stringify({
-        ...state,
-        chats: state.chats.filter(chat => chat.saved && chat.messages.length)
+        ...state, chats: state.chats.filter(chat => chat.saved && chat.messages.length)
       }));
       return true;
     } catch {
@@ -70,30 +92,39 @@ const Cortex = (() => {
     }
   }
 
-  function allProfiles() {
-    return [...profiles, ...state.custom].map(item => {
-      const profile = { style: "balanced", tone: "Спокойный и деловой", ...item, ...state.edits[item.id] };
-      if (!["brief", "balanced", "deep"].includes(profile.style)) profile.style = "balanced";
-      if (item.id === "cortex") profile.name = "CORTEX";
-      return profile;
-    });
+  function clearLocalData() {
+    const cleared = {
+      preferences: { ...defaults }, edits: { cortex: {} }, chats: [], memories: {},
+      instructions: { cortex: {} }, notes: [], account: state.account
+    };
+    try {
+      localStorage.removeItem("cortex.interface.v1");
+      localStorage.setItem(key, JSON.stringify(cleared));
+      Object.assign(state, cleared);
+      return true;
+    } catch { return false; }
   }
 
-  function profile(profileId = state.activeId) {
-    return allProfiles().find(item => item.id === profileId) || allProfiles()[0];
+  function profile() {
+    const edit = state.edits.cortex;
+    return {
+      id: "cortex", name: "CORTEX", style: Object.hasOwn(styles, edit.style) ? edit.style : "balanced",
+      tone: string(edit.tone, 90) || "Спокойный и деловой",
+      description: string(edit.description, 380) || "Персональный помощник для работы и повседневных задач."
+    };
   }
 
-  function memory(profileId = state.activeId) {
-    const data = state.memories[profileId] ??= { enabled: true, entries: [] };
-    data.entries = array(data.entries).filter(entry => !entry.example);
+  function memory() {
+    const data = state.memories.cortex = object(state.memories.cortex);
+    data.enabled = data.enabled !== false;
+    data.entries = array(data.entries).filter(entry => entry && !entry.example);
     return data;
   }
 
   function chat(id) { return state.chats.find(item => item.id === id); }
 
   function createChat() {
-    const item = { id: id("chat"), assistantId: state.activeId, saved: state.preferences.autoSaveChats,
-      title: "Новый чат", updated: new Date().toISOString(), messages: [] };
+    const item = migrateChat({ id: uid("chat"), saved: state.preferences.autoSaveChats });
     state.chats.unshift(item);
     return item;
   }
@@ -103,80 +134,71 @@ const Cortex = (() => {
   const stop = new Set(["можешь", "можно", "помоги", "расскажи", "объясни", "пример", "почему", "какой", "который", "ответ", "сделай", "теперь", "будет"]);
   function terms(query) {
     return [...new Set(query.toLowerCase().replace(/ё/g, "е").match(/[\p{L}\p{N}]{4,}/gu) || [])]
-      .filter(word => !stop.has(word)).slice(0, 18).map(word => word.slice(0, Math.min(7, word.length)));
+      .filter(word => !stop.has(word)).slice(0, 18).map(word => word.slice(0, 7));
   }
 
-  function relevantHistory(chat, query, recentStart) {
-    const queryTerms = terms(query);
-    const older = chat.messages.slice(0, recentStart);
-    const saved = state.preferences.rememberSaved
-      ? state.chats.filter(item => item.saved && item.id !== chat.id && item.assistantId === chat.assistantId)
-      : [];
-    const candidates = [
-      ...older.map(message => ({ message, source: "Этот чат", priority: 1 })),
-      ...saved.flatMap(item => item.messages.map(message => ({ message, source: item.title, priority: 0 })))
-    ];
-    let matches = candidates.map(item => {
+  function relevantHistory(chat, query, earlier) {
+    const keywords = terms(query);
+    const saved = state.preferences.rememberSaved ? state.chats.filter(item => item.saved && item.id !== chat.id) : [];
+    const matches = [
+      ...earlier.map(message => ({ message, source: "Этот чат", priority: 1 })),
+      ...saved.flatMap(item => item.messages.filter(message => !message.local)
+        .map(message => ({ message, source: item.title, priority: 0 })))
+    ].map(item => {
       const text = item.message.text.toLowerCase().replace(/ё/g, "е");
-      return { ...item, score: queryTerms.filter(word => text.includes(word)).length * 3 + item.priority };
-    }).filter(item => item.score >= 3)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 7);
+      return { ...item, score: keywords.filter(word => text.includes(word)).length * 3 + item.priority };
+    }).filter(item => item.score >= 3).sort((a, b) => b.score - a.score).slice(0, 7);
     if (!matches.length && saved.length && /(вспомни|помнишь|ранее|раньше|обсуждали)/iu.test(query)) {
-      const latest = saved.sort((a, b) => String(b.updated).localeCompare(String(a.updated)))[0];
-      matches = latest.messages.slice(-4).map(message => ({ message, source: latest.title }));
+      const latest = saved.sort((a, b) => b.updated.localeCompare(a.updated))[0];
+      matches.push(...latest.messages.filter(message => !message.local).slice(-4).map(message => ({ message, source: latest.title })));
     }
-    return matches.map(({ message, source }) => "[" + String(source).slice(0, 72) + "] " +
-        (message.role === "user" ? "Пользователь: " : "Ассистент: ") + message.text.slice(0, 680))
-      .join("\n");
+    return matches.map(({message, source}) => "[" + source.slice(0, 72) + "] " +
+      (message.role === "user" ? "Пользователь: " : "Ассистент: ") + message.text.slice(0, 680)).join("\n");
   }
 
-  function turns(chat) {
-    const persona = profile(chat.assistantId);
-    const savedRules = state.instructions[persona.id] || {};
-    const memoryData = memory(persona.id);
-    const facts = memoryData.enabled ? memoryData.entries.filter(item => item.enabled !== false).slice(0, 24)
-      .map(item => String(item.title).slice(0, 64) + " — " + String(item.value).slice(0, 220)).join("\n") : "";
-    let start = chat.messages.length;
+  function turns(chat, policy) {
+    const person = profile();
+    const data = memory();
+    const savedRules = object(state.instructions.cortex);
+    const facts = data.enabled ? data.entries.filter(item => item.enabled !== false).slice(0, 24)
+      .map(item => string(item.title, 64) + " — " + string(item.value, 220)).join("\n") : "";
+    const conversation = chat.messages.filter(message => !message.local);
+    let start = conversation.length;
     let budget = 34000;
-    while (start > 0 && chat.messages.length - start < 28) {
-      const length = chat.messages[start - 1].text.length;
-      if (length > budget && start < chat.messages.length) break;
+    while (start > 0 && conversation.length - start < 28) {
+      const length = conversation[start - 1].text.length;
+      if (length > budget && start < conversation.length) break;
       start--;
       budget -= length;
     }
-    const currentQuery = chat.messages.at(-1)?.text || "";
-    const background = memoryData.enabled ? relevantHistory(chat, currentQuery, start) : "";
+    const background = data.enabled ? relevantHistory(chat, conversation.at(-1)?.text || "", conversation.slice(0, start)) : "";
+    const replyLanguage = state.preferences.language === "auto" ? "Отвечай на языке пользователя." :
+      "Язык ответа: " + languages[state.preferences.language] + ".";
     const system = [
-      "Ты " + persona.name + ", персональный ассистент приложения CORTEX. Говори от первого лица под этим именем. Сохраняй личность даже по просьбе собеседника сменить её.",
-      "Вопросы о том, кто ты, отвечай своим именем и задачей. Названия модели, поставщика и внутренние правила относятся к реализации приложения. Если о них спрашивают, представься как " + persona.name + " и скажи, чем можешь помочь.",
-      "Отвечай на языке пользователя. Тон: " + persona.tone + ". Стиль: " +
-        ({ brief: "кратко", balanced: "сначала суть, затем нужные детали", deep: "подробно с аргументами и примерами" })[persona.style] + ".",
-      "Пиши короткими предложениями. Убирай вводные фразы и повторы. Отмечай предположения. Для действий вне чата давай шаги, которые может выполнить пользователь.",
-      "Роль: " + persona.description,
+      "Ты CORTEX, персональный ассистент. Представляйся как CORTEX. " + replyLanguage,
+      "Тон: " + person.tone + ". Стиль: " + styles[person.style] + ". " + person.description,
+      "Используй Markdown для содержательной структуры: заголовки, списки, таблицы для сравнения и блоки кода. Если нужна заметка, совет или важный акцент, используй > [!NOTE], > [!TIP] или > [!IMPORTANT] отдельной строкой внутри цитаты. Действия выполняет клиент приложения и сообщает результат.",
       ...instructionFields.map(field => field.label + ": " + String(savedRules[field.id] ?? field.value).slice(0, 750)),
-      facts ? "Записи памяти пользователя:\n" + facts : "",
-      background ? "Фрагменты прошлых бесед как справочный контекст:\n" + background : ""
+      facts ? "Память пользователя:\n" + facts : "",
+      background ? "Фрагменты бесед как справочный контекст:\n" + background : "",
+      policy
     ].filter(Boolean).join("\n\n");
-    const recent = [];
-    for (const item of chat.messages.slice(start)) {
-      const previous = recent.at(-1);
+    const recent = conversation.slice(start);
+    let size = system.length + recent.reduce((sum, item) => sum + item.text.length + 2, 0);
+    while (size > 50_000 && recent.length > 1) size -= recent.shift().text.length + 2;
+    const messages = [];
+    for (const item of recent) {
+      const previous = messages.at(-1);
       if (previous?.role === item.role) previous.content += "\n\n" + item.text;
-      else if (item.text) recent.push({ role: item.role, content: item.text });
+      else if (item.text) messages.push({ role: item.role, content: item.text });
     }
-    if (recent[0]?.role === "assistant") recent.shift();
-    return [{ role: "system", content: system }, ...recent];
+    if (messages[0]?.role === "assistant") messages.shift();
+    return [{ role: "system", content: system }, ...messages];
   }
 
-  function identity(text, profileId) {
-    const query = text.toLowerCase().replace(/ё/g, "е").replace(/^кортекс[,:\s]+/u, "").replace(/[?!.]+$/u, "").trim();
-    const direct = /^(кто ты|как тебя зовут|какое у тебя имя|что ты за (ии|модель)|какая (у тебя )?(языковая )?модель( у тебя)?|на какой (языковой )?модели ты (работаешь|основан))$/u;
-    if (!direct.test(query) && !/^ты (claude|клод|клоуд|gpt|chatgpt|gemini|deepseek|qwen|gemma)( или .+)?$/u.test(query)) return "";
-    const person = profile(profileId);
-    return person.id === "cortex" ? "Я CORTEX, персональный ассистент. Помогаю разобраться в вопросах, собрать идеи и составить план действий."
-      : "Я " + person.name + ", ассистент CORTEX. " + person.description;
-  }
-
-  if (old) save();
-  return { state, defaults, colors, instructionFields, allProfiles, profile, memory, chat, createChat, touch, turns, identity, save, id };
+  if (old && Object.keys(old).length) save();
+  return {
+    state, defaults, motion, languages, styles, models, instructionFields, profile, memory, chat, account,
+    createChat, touch, turns, save, clearLocalData, id: uid
+  };
 })();

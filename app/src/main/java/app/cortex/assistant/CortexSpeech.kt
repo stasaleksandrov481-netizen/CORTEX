@@ -1,0 +1,106 @@
+package app.cortex.assistant
+
+import android.app.Activity
+import android.content.Intent
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import org.json.JSONObject
+import java.util.Locale
+
+/** Voice input while the app is foregrounded; this is not a background hotword service. */
+class CortexSpeech(private val activity: Activity, private val emit: (JSONObject) -> Unit) {
+    private val ui = Handler(Looper.getMainLooper())
+    private var recognizer: SpeechRecognizer? = null
+    private var activeId: String? = null
+    private var utteranceId: String? = null
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+
+    init { tts = TextToSpeech(activity.applicationContext) { status -> ttsReady = status == TextToSpeech.SUCCESS } }
+
+    private fun voice(id: String, phase: String, text: String? = null, level: Double? = null) {
+        val e = JSONObject().put("type", "voice").put("id", id).put("phase", phase)
+        if (text != null) e.put("text", text)
+        if (level != null) e.put("level", level)
+        emit(e)
+    }
+    private fun speech(id: String, phase: String) { emit(JSONObject().put("type", "speech").put("id", id).put("phase", phase)) }
+
+    fun listen(id: String, language: String) {
+        stop()
+        if (!SpeechRecognizer.isRecognitionAvailable(activity)) {
+            voice(id, "error", "На устройстве нет доступного распознавания речи.")
+            return
+        }
+        activeId = id
+        try {
+            val r = SpeechRecognizer.createSpeechRecognizer(activity)
+            recognizer = r
+            r.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) = voice(id, "ready")
+                override fun onBeginningOfSpeech() = voice(id, "hearing")
+                override fun onRmsChanged(rmsdB: Float) = voice(id, "level", level = ((rmsdB + 2) / 16).coerceIn(0f, 1f).toDouble())
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() = voice(id, "finishing")
+                override fun onError(error: Int) {
+                    if (activeId == id) { activeId = null; voice(id, "error", "Распознавание речи не завершилось. Попробуйте снова.") }
+                }
+                override fun onResults(results: Bundle?) {
+                    if (activeId == id) {
+                        activeId = null
+                        voice(id, "result", results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty())
+                    }
+                }
+                override fun onPartialResults(partialResults: Bundle?) {
+                    if (activeId == id) voice(id, "partial", partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty())
+                }
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+            r.startListening(intent)
+        } catch (_: Exception) {
+            activeId = null
+            voice(id, "error", "Android не разрешил запустить микрофон.")
+        }
+    }
+
+    fun finish(id: String) { if (activeId == id) recognizer?.stopListening() }
+    fun cancel(id: String?) { if (id == null || activeId == id) stop() }
+    fun stop() {
+        activeId = null
+        recognizer?.cancel()
+        recognizer?.destroy()
+        recognizer = null
+    }
+
+    fun speak(id: String, text: String, language: String, speed: Float) {
+        if (!ttsReady || tts == null) { speech(id, "error"); return }
+        try {
+            tts?.stop()
+            utteranceId = id
+            tts?.language = Locale.forLanguageTag(language)
+            tts?.setSpeechRate(speed.coerceIn(0.6f, 1.5f))
+            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) { if (utteranceId == id) ui.post { speech(id, "started") } }
+                override fun onDone(utteranceId: String?) { if (utteranceId == id) ui.post { speech(id, "done") } }
+                @Deprecated("System TTS error callback") override fun onError(utteranceId: String?) { if (utteranceId == id) ui.post { speech(id, "error") } }
+            })
+            val result = tts?.speak(text.take(4500), TextToSpeech.QUEUE_FLUSH, Bundle(), id)
+            if (result != TextToSpeech.SUCCESS) speech(id, "error")
+        } catch (_: Exception) { speech(id, "error") }
+    }
+    fun silence(id: String?) {
+        tts?.stop()
+        if (utteranceId != null && (id == null || utteranceId == id)) { speech(utteranceId!!, "stopped"); utteranceId = null }
+    }
+    fun close() { stop(); tts?.shutdown(); tts = null }
+}

@@ -3,6 +3,15 @@
 const CortexIcons = (() => {
   const paths = {
     sendUp: '<path d="M12 20V5m-6 6 6-6 6 6"/>',
+    newChat: '<path d="M20.5 11.8a8.5 8.5 0 0 1-8.5 8.5H4l1.4-3.8A8.5 8.5 0 0 1 12 3.4c1 0 1.9.1 2.8.4M18 3v6m-3-3h6"/>',
+    core: '<g fill="currentColor" stroke="none"><circle cx="12" cy="12" r="2.45"/><circle cx="5.5" cy="12" r="1.55"/><circle cx="18.5" cy="12" r="1.55"/><circle cx="12" cy="5.5" r="1.55"/><circle cx="12" cy="18.5" r="1.55"/><circle cx="7.4" cy="7.4" r="1.1"/><circle cx="16.6" cy="16.6" r="1.1"/><circle cx="7.4" cy="16.6" r="1.1"/><circle cx="16.6" cy="7.4" r="1.1"/></g>',
+    copy: '<rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 4H6a2 2 0 0 0-2 2v10"/>',
+    download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
+    help: '<path d="M3 13v-2a9 9 0 0 1 18 0v2M8 14a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2Zm8 0a2 2 0 0 1 2-2h1a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2Zm5 2v2a3 3 0 0 1-3 3h-5"/>',
+    logout: '<path d="M10 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h5m5-13 5 5-5 5m-6-5h11"/>',
+    image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8" cy="9" r="1.4"/><path d="m3 17 5-4 4 3 4-5 5 6"/>',
+    pin: '<path d="m14 3 7 7-4 1-4 4-1 3-6-6 3-1 4-4zM8 16l-5 5"/>',
+    alert: '<circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01"/>',
     bookmark: '<path d="M6 4h12v17l-6-4-6 4z"/>',
     spark: '<path d="M12 2c1 6 4 9 10 10-6 1-9 4-10 10-1-6-4-9-10-10 6-1 9-4 10-10Z"/>',
     home: '<path d="m3 10 9-7 9 7v9a2 2 0 0 1-2 2h-4v-7H9v7H5a2 2 0 0 1-2-2z"/>',
@@ -51,7 +60,7 @@ const CortexIcons = (() => {
   return (name, size = 20) => {
     const viewBox = name === "signal" ? "0 0 24 13" : "0 0 24 24";
     return '<svg aria-hidden="true" width="' + size + '" height="' + size + '" viewBox="' + viewBox +
-      '" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">' +
+      '" fill="none" stroke="currentColor" stroke-width="2.12" stroke-linecap="round" stroke-linejoin="round">' +
       (paths[name] || paths.info) + "</svg>";
   };
 })();

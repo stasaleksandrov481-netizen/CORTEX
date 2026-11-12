@@ -1,40 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 202 184" fill="none">
-  <defs>
-    <linearGradient id="ribbon" x1="52" y1="14" x2="147" y2="162" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#cfebed"/><stop offset=".22" stop-color="#81b6c0"/><stop offset=".47" stop-color="#566b8d"/>
-      <stop offset=".68" stop-color="#474065"/><stop offset=".89" stop-color="#755c8a"/><stop offset="1" stop-color="#b894ba"/>
-    </linearGradient>
-    <linearGradient id="fold" x1="114" y1="24" x2="33" y2="124" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#bae0e3"/><stop offset=".34" stop-color="#7aa4b2"/><stop offset=".67" stop-color="#2f3b4b"/>
-      <stop offset="1" stop-color="#1f2138"/>
-    </linearGradient>
-    <linearGradient id="inside" x1="43" y1="68" x2="145" y2="164" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#c3e5e7" stop-opacity=".96"/><stop offset=".41" stop-color="#94b4c5" stop-opacity=".08"/>
-      <stop offset=".76" stop-color="#a592b8" stop-opacity=".36"/><stop offset="1" stop-color="#d7c2da"/>
-    </linearGradient>
-    <linearGradient id="base" x1="102" y1="104" x2="165" y2="158" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#605e85" stop-opacity="0"/><stop offset=".57" stop-color="#765f87" stop-opacity=".38"/>
-      <stop offset="1" stop-color="#ae8bb1" stop-opacity=".85"/>
-    </linearGradient>
-    <filter id="glow" x="-35%" y="-35%" width="170%" height="170%"><feGaussianBlur stdDeviation="5"/></filter>
-    <path id="shape" d="M170 54C166 17 126 7 94 15 58 24 29 49 19 80 8 115 24 146 56 162 86 177 131 179 162 157 177 146 191 123 180 111 170 100 154 110 137 122 117 136 97 149 76 141 54 133 56 103 72 80 93 50 122 34 143 44 154 49 161 65 167 63 170 62 171 58 170 54Z"/>
-    <clipPath id="clip"><use href="#shape"/></clipPath>
-  </defs>
-  <use href="#shape" fill="url(#ribbon)" filter="url(#glow)" opacity=".58"/>
-  <use href="#shape" fill="url(#ribbon)" stroke="#d1e7eb" stroke-opacity=".36" stroke-width=".7"/>
-  <g clip-path="url(#clip)">
-    <path d="M172 66C149 38 131 31 100 48 65 67 50 99 57 129 50 123 39 107 38 87 37 65 53 46 71 32 110 5 157 11 170 38Z" fill="url(#fold)"/>
-    <path d="M30 116C43 158 86 171 122 152 148 138 161 113 181 113L187 142 160 172 70 182 26 152Z" fill="url(#base)"/>
-    <g stroke="url(#inside)" stroke-width=".48" opacity=".64">
-      <path d="M163 31C135 16 96 28 66 53 32 82 27 118 48 143 73 170 125 170 168 134"/>
-      <path d="M165 35C135 19 100 29 70 54 38 81 32 119 52 143 78 167 127 166 173 130"/>
-      <path d="M167 39C136 22 103 30 74 54 42 81 38 121 57 143 84 165 130 160 176 126"/>
-      <path d="M169 43C138 25 108 31 78 55 48 82 43 123 63 143 89 162 133 154 179 121"/>
-      <path d="M171 47C138 29 113 31 83 56 54 82 47 125 69 144 93 158 137 149 181 117"/>
-      <path d="M174 51C138 33 116 32 88 57 59 83 52 126 75 144 99 155 139 144 184 114"/>
-      <path d="M154 24C126 11 90 24 60 50 23 82 22 117 43 143 70 175 124 175 162 143"/>
-      <path d="M144 21C117 12 85 25 57 51 21 83 18 117 39 143 66 179 121 179 158 147"/>
-    </g>
-  </g>
-  <path d="M25 93C33 56 67 27 102 18 122 12 144 15 158 28M60 152C88 170 132 169 160 150 170 144 180 130 182 120" stroke="url(#inside)" stroke-width="1.6" stroke-linecap="round" opacity=".9"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <path d="M36 13.7 23 10 11 17v14l12 7 13-3.7" stroke="#fff" stroke-width="4.3" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="29" cy="24" r="2.4" fill="#fff"/>
+  <circle cx="38" cy="24" r="1.55" fill="#fff"/>
 </svg>

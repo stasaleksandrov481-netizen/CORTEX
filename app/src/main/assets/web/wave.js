@@ -1,242 +1,249 @@
 "use strict";
 
 const CortexWave = (() => {
-  const vertex = `
-    attribute vec2 grid;
-    uniform mediump float time;
-    uniform mediump float layer;
-    uniform float aspect;
-    uniform float amplitude;
-    varying mediump vec3 pointOnRibbon;
-    varying mediump vec3 surfaceNormal;
-    varying mediump vec2 textureUV;
+  const duration = milliseconds => milliseconds * 2;
+  const clamp = (value, low = 0, high = 1) => Math.max(low, Math.min(high, value));
+  const smooth = value => {
+    const t = clamp(value);
+    return t * t * (3 - 2 * t);
+  };
+  const tau = Math.PI * 2;
+  const spacings = [8.7, 10.2, 12.0, 14.5, 17];
+  const colors = Array.from({ length: 14 }, (_, index) => "rgba(255,255,255," + ((index + 1) / 15).toFixed(3) + ")");
 
-    vec3 ribbon(vec2 uv) {
-      float s = uv.x;
-      float angle = uv.y * 6.2831853;
-      float drift = time * (.62 + layer * .037);
-      float phase = layer * .82;
-      float envelope = pow(max(.015, sin(s * 3.14159)), .55);
-      float curl = sin(s * 7.9 - drift + phase) * .31
-        + sin(s * 13.7 + drift * .54 + phase) * .10;
-      float y = curl * amplitude + (layer - 1.) * .115;
-      float z = sin(s * 9.1 + drift * .7 + phase) * .24 + layer * .16 - .13;
-      float twist = sin(s * 6.4 - drift * .63 + phase) * 1.84 + .54;
-      float width = (.235 - layer * .022) * envelope + .046;
-      float thickness = (.079 - layer * .008) * envelope + .019;
-      float side = cos(angle) * width;
-      float depth = sin(angle) * thickness;
-      float wing = .055 * sin(angle * 2. + s * 9.) * envelope;
-      return vec3(
-        (s - .5) * 3.24 + side * .18 * sin(twist),
-        y + side * cos(twist) - depth * sin(twist) + wing,
-        z + side * sin(twist) + depth * cos(twist)
-      );
+  let field, ctx, host, observer, grid, pulseGrid;
+  let width = 0, height = 0, frame = 0, previous = 0, age = 0, clock = 1.7;
+  let kind = "home", mode = "idle", quality = "balanced", still = false, running = false;
+  let level = 0, energy = .55, chatMix = 0, textMix = 0, populated = false, ripple;
+  let average = 16.7, slow = 0, adaptive = 0;
+
+  function arrange() {
+    const rank = quality === "full" ? 0 : quality === "simple" ? 3 : 1;
+    const ambient = kind === "home" || kind === "chat" || kind === "splash";
+    const gap = spacings[Math.min(4, rank + adaptive)] * (ambient ? 1 : .78);
+    const columns = Math.max(1, Math.ceil(width / gap));
+    const rows = Math.max(1, Math.ceil(height / gap));
+    const left = (width - (columns - 1) * gap) / 2;
+    const top = (height - (rows - 1) * gap) / 2;
+    const x = Float32Array.from({ length: columns }, (_, column) => left + column * gap);
+    const y = Float32Array.from({ length: rows }, (_, row) => top + row * gap);
+    const crest = new Float32Array(columns);
+    const drift = new Float32Array(columns);
+    const grain = new Float32Array(rows * columns);
+    const radial = new Float32Array(rows * columns);
+    const px = new Float32Array(rows * columns), py = new Float32Array(rows * columns);
+    const tones = new Int8Array(rows * columns), radii = new Float32Array(rows * columns);
+    for (let row = 0, i = 0; row < rows; row++) {
+      for (let column = 0; column < columns; column++, i++) {
+        grain[i] = ((row * 41 + column * 17 + row * column * 7) % 53) / 53;
+        radial[i] = Math.hypot(x[column] - width * .5, y[row] - height * .44);
+      }
     }
-
-    void main() {
-      vec3 p = ribbon(grid);
-      vec3 tangent = ribbon(grid + vec2(.001, 0.)) - p;
-      vec3 around = ribbon(grid + vec2(0., .001)) - p;
-      surfaceNormal = normalize(cross(tangent, around));
-      pointOnRibbon = p;
-      textureUV = grid;
-      float perspective = 1.09 - p.z * .25;
-      gl_Position = vec4(p.x * .73 / perspective, p.y * aspect * .96 / perspective, -.56 * p.z, 1.);
-    }
-  `;
-
-  const fragment = `
-    precision mediump float;
-    uniform mediump float layer;
-    uniform mediump float time;
-    varying mediump vec3 pointOnRibbon;
-    varying mediump vec3 surfaceNormal;
-    varying mediump vec2 textureUV;
-
-    void main() {
-      float s = textureUV.x;
-      vec3 n = normalize(surfaceNormal);
-      vec3 camera = normalize(vec3(0., .03, 2.7) - pointOnRibbon);
-      if (dot(n, camera) < 0.) n = -n;
-      vec3 key = normalize(vec3(-.52, .78, .68));
-      vec3 fill = normalize(vec3(.76, -.24, .66));
-      float diffuse = max(0., dot(n, key));
-      float diffuseFill = max(0., dot(n, fill));
-      float facing = max(0., dot(n, camera));
-      float rim = pow(1. - facing, 3.1);
-      float gloss = pow(max(0., dot(n, normalize(key + camera))), 34.);
-      float sheen = pow(max(0., dot(n, normalize(fill + camera))), 12.);
-      float shift = sin(s * 7.5 + layer * .8 + time * .49) * .06;
-      vec3 teal = vec3(.015, .78, .97);
-      vec3 blue = vec3(.11, .27, .99);
-      vec3 violet = vec3(.68, .15, .96);
-      vec3 magenta = vec3(1., .23, .75);
-      vec3 pigment = mix(teal, blue, smoothstep(.12, .57, s + shift));
-      pigment = mix(pigment, violet, smoothstep(.42, .81, s + shift + layer * .041));
-      pigment = mix(pigment, magenta, smoothstep(.76, .99, s + shift) * .65);
-      float fibre = sin(textureUV.y * 113.097 + s * 20. + time * .24);
-      float filaments = pow(max(0., fibre), 10.) * (.009 + rim * .028);
-      vec3 silk = pigment * (.20 + diffuse * .62 + diffuseFill * .22 + filaments);
-      silk += vec3(.64, .87, 1.) * gloss * .62;
-      silk += vec3(.64, .44, .98) * sheen * .30;
-      silk += (pigment * .57 + vec3(.13, .18, .28)) * rim;
-      float edge = smoothstep(0., .095, s) * smoothstep(0., .095, 1. - s);
-      float alpha = edge * mix(.84, .98, layer * .5);
-      gl_FragColor = vec4(silk, alpha);
-    }
-  `;
-
-  let canvas;
-  let gl;
-  let program;
-  let uniforms;
-  let indexCount;
-  let host;
-  let observer;
-  let frame;
-  let last = 0;
-  let clock = 1.9;
-  let active = false;
-  let still = false;
-
-  function compile(kind, source) {
-    const shader = gl.createShader(kind);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      throw new Error(gl.getShaderInfoLog(shader));
-    }
-    return shader;
+    grid = { x, y, crest, drift, grain, radial, px, py, tones, radii };
+    preparePulse();
   }
 
-  function init() {
-    canvas = document.createElement("canvas");
-    canvas.className = "ribbon-canvas";
-    canvas.setAttribute("aria-hidden", "true");
-    try {
-      gl = canvas.getContext("webgl", {
-        alpha: true, antialias: true, depth: true, premultipliedAlpha: false, powerPreference: "low-power"
-      });
-      if (!gl) return;
-      const vs = compile(gl.VERTEX_SHADER, vertex);
-      const fs = compile(gl.FRAGMENT_SHADER, fragment);
-      program = gl.createProgram();
-      gl.attachShader(program, vs);
-      gl.attachShader(program, fs);
-      gl.linkProgram(program);
-      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
-      gl.deleteShader(vs);
-      gl.deleteShader(fs);
-      gl.useProgram(program);
-      uniforms = Object.fromEntries(["time", "layer", "aspect", "amplitude"].map(name => [name, gl.getUniformLocation(program, name)]));
-      const length = 156;
-      const cross = 32;
-      const vertices = [];
-      const indices = [];
-      for (let i = 0; i <= length; i++) {
-        for (let j = 0; j <= cross; j++) {
-          vertices.push(i / length, j / cross);
-          if (i === length || j === cross) continue;
-          const p = i * (cross + 1) + j;
-          const next = p + cross + 1;
-          indices.push(p, next, p + 1, p + 1, next, next + 1);
-        }
+  function preparePulse() {
+    if (!grid || !ripple) { pulseGrid = null; return; }
+    const originX = ripple.x * width, originY = ripple.y * height;
+    pulseGrid = new Float32Array(grid.tones.length);
+    for (let row = 0, i = 0; row < grid.y.length; row++) {
+      for (let column = 0; column < grid.x.length; column++, i++) {
+        pulseGrid[i] = Math.hypot(grid.x[column] - originX, grid.y[row] - originY);
       }
-      const mesh = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, mesh);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
-      const attribute = gl.getAttribLocation(program, "grid");
-      gl.enableVertexAttribArray(attribute);
-      gl.vertexAttribPointer(attribute, 2, gl.FLOAT, false, 0, 0);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
-      indexCount = indices.length;
-      gl.enable(gl.DEPTH_TEST);
-      gl.enable(gl.BLEND);
-      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-      gl.clearColor(0, 0, 0, 0);
-      canvas.addEventListener("webglcontextlost", event => {
-        event.preventDefault();
-        stop();
-        host?.classList.add("wave-fallback");
-      });
-      canvas.addEventListener("webglcontextrestored", () => {
-        const previous = host;
-        canvas.remove();
-        canvas = null;
-        gl = null;
-        if (previous?.isConnected) mount(previous, still);
-      });
-    } catch {
-      gl = null;
+    }
+  }
+
+  function paint(elapsed) {
+    if (!grid || !width || !height) return;
+    const launch = kind === "splash";
+    const ambient = kind === "home" || kind === "chat";
+    const blending = still ? 1 : 1 - Math.exp(-elapsed / 240);
+    const targetEnergy = mode === "voice" ? .22 + level * .88 :
+      mode === "speaking" ? .72 + Math.sin(clock * 7.2) * .16 : mode === "thinking" ? .79 :
+      mode === "focus" ? .36 : .58;
+    energy += (targetEnergy - energy) * blending;
+    chatMix += ((kind === "chat" ? 1 : 0) - chatMix) * blending;
+    textMix += ((populated ? 1 : 0) - textMix) * blending;
+
+    const { x, y, crest, drift, grain, radial, tones, radii, px, py } = grid;
+    const t = clock, short = Math.min(width, height);
+    const bloom = ambient ? .89 - chatMix * .18 - textMix * .45 : 1;
+    const entrance = still ? 1 : smooth(age / 1.3);
+    const progress = still ? 1 : clamp(age / 3.05);
+    const launchFront = short * (.06 + .88 * (1 - (1 - progress) ** 1.65));
+    const launchRidge = Math.max(19, short * .135);
+    const rippleAge = ripple ? clamp((clock - ripple.since) / .60) : 1;
+    const rippleFront = Math.hypot(width, height) * (1 - (1 - rippleAge) ** 1.6);
+    const rippleGain = (1 - rippleAge) * .83;
+    const midline = ambient ? .55 - chatMix * .13 : .51;
+
+    for (let column = 0; column < x.length; column++) {
+      const u = x[column] / width;
+      crest[column] = midline + Math.sin(u * 5.9 - t * 1.17) * (.084 + energy * .10) +
+        Math.sin(u * 10.4 + t * .61 + .8) * .037;
+      drift[column] = Math.cos(u * 8.1 + t * 1.35);
+    }
+    for (let row = 0, i = 0; row < y.length; row++) {
+      const v = y[row] / height;
+      const rowDrift = Math.sin(v * 11.6 + t * 1.42);
+      const edge = .28 + .72 * smooth(Math.min(v, 1 - v) * 5.2);
+      for (let column = 0; column < x.length; column++, i++) {
+        const g = grain[i];
+        const d = v - crest[column];
+        const primary = Math.max(0, 1 - Math.abs(d) * (ambient ? 4.3 : 4.8));
+        const echo = Math.max(0, 1 - Math.abs(d + .228) * 6.3);
+        const halo = Math.max(0, 1 - Math.abs(d - .23) * 5.1);
+        let light = edge * (.082 + g * .10 +
+          primary * primary * (.31 + .26 * energy) * (.83 + .17 * drift[column]) +
+          echo * echo * .17 + halo * halo * .10) * bloom;
+        let displacement = primary * (1.4 + energy * 3.9);
+        if (launch) {
+          const distance = radial[i];
+          const ring = Math.max(0, 1 - Math.abs(distance - launchFront) / launchRidge);
+          const echoRing = Math.max(0, 1 - Math.abs(distance - launchFront + short * .18) / (launchRidge * .9));
+          const edgeGlow = Math.max(0, 1 - distance / (short * 1.36));
+          light = edge * (.07 + .08 * g + .22 * edgeGlow + ring * ring * .47 + echoRing * .15) *
+            (.37 + .63 * smooth(age / .46));
+          displacement = (ring + echoRing * .5) * 5.5;
+        } else if (pulseGrid && rippleGain > 0) {
+          const wave = Math.max(0, 1 - Math.abs(pulseGrid[i] - rippleFront) / 53);
+          light += wave * wave * rippleGain * .54;
+          displacement += wave * rippleGain * 7;
+        }
+        if (!launch) light *= .57 + .43 * entrance;
+        tones[i] = light < .065 ? -1 : Math.min(colors.length - 1, Math.floor(light * 15));
+        radii[i] = .57 + light * 1.27;
+        px[i] = x[column] + (rowDrift * .74 + g - .5) * displacement;
+        py[i] = y[row] + drift[column] * displacement + (1 - entrance) * (12 + g * 15);
+      }
+    }
+
+    ctx.clearRect(0, 0, width, height);
+    for (let band = 0; band < colors.length; band++) {
+      ctx.beginPath();
+      for (let i = 0; i < tones.length; i++) {
+        if (tones[i] !== band) continue;
+        ctx.moveTo(px[i] + radii[i], py[i]);
+        ctx.arc(px[i], py[i], radii[i], 0, tau);
+      }
+      ctx.fillStyle = colors[band];
+      ctx.fill();
     }
   }
 
   function resize() {
-    if (!host || !gl) return;
-    const width = host.clientWidth;
-    const height = host.clientHeight;
-    if (!width || !height) return;
-    const ratio = Math.min(devicePixelRatio || 1, 1.65, 1050 / width);
-    canvas.width = Math.round(width * ratio);
-    canvas.height = Math.round(height * ratio);
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    draw();
+    if (!host || !ctx) return;
+    const w = host.clientWidth, h = host.clientHeight;
+    if (!w || !h) return;
+    const ratio = Math.min(devicePixelRatio || 1, quality === "full" ? 1.6 : quality === "simple" ? 1 : 1.24,
+      Math.sqrt(570_000 / (w * h)));
+    const pixelW = Math.max(1, Math.round(w * ratio)), pixelH = Math.max(1, Math.round(h * ratio));
+    if (w === width && h === height && field.width === pixelW && field.height === pixelH && grid) return;
+    width = w;
+    height = h;
+    field.width = pixelW;
+    field.height = pixelH;
+    ctx.setTransform(pixelW / w, 0, 0, pixelH / h, 0, 0);
+    arrange();
+    paint(16.7);
   }
 
-  function draw() {
-    if (!gl || !canvas.height) return;
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    gl.uniform1f(uniforms.time, clock);
-    gl.uniform1f(uniforms.aspect, Math.min(1.46, canvas.width / canvas.height));
-    gl.uniform1f(uniforms.amplitude, host?.closest(".splash") ? .77 : 1.);
-    for (let layer = 0; layer < 3; layer++) {
-      gl.uniform1f(uniforms.layer, layer);
-      gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_SHORT, 0);
+  function tick(now) {
+    if (!running || still || document.hidden || window.cortexAppVisible === false) return;
+    const elapsed = previous ? Math.min(80, now - previous) : 16.7;
+    previous = now;
+    age += elapsed / 1000;
+    clock += elapsed / duration(1000);
+    level *= Math.exp(-elapsed / 410);
+    average += (elapsed - average) * .06;
+    slow = average > 25 ? slow + 1 : Math.max(0, slow - 2);
+    if (slow > 38 && adaptive < 2) {
+      adaptive++;
+      slow = 0;
+      arrange();
     }
-  }
-
-  function loop(now) {
-    if (!active || still || document.hidden) return;
-    if (!last) last = now - 34;
-    const elapsed = now - last;
-    if (elapsed >= 31) {
-      clock += Math.min(elapsed, 75) / 1000;
-      last = now;
-      draw();
+    if (ripple && clock - ripple.since >= .60) {
+      ripple = null;
+      pulseGrid = null;
     }
-    frame = requestAnimationFrame(loop);
+    paint(elapsed);
+    frame = requestAnimationFrame(tick);
   }
 
   function stop() {
-    active = false;
+    running = false;
     cancelAnimationFrame(frame);
     observer?.disconnect();
-    last = 0;
+    previous = 0;
   }
 
-  function mount(next, reduced = false) {
+  function restart() {
+    age = 0;
+    previous = 0;
+    paint(16.7);
+  }
+
+  function mount(next, options) {
+    const sameHost = running && host === next;
+    const updatedQuality = quality !== options.quality;
+    const updatedMotion = still !== options.still;
+    kind = options.kind;
+    quality = options.quality;
+    still = options.still;
+    mode = options.mode;
+    populated = options.populated;
+    if (!field) {
+      field = document.createElement("canvas");
+      field.className = "wave-canvas";
+      field.setAttribute("aria-hidden", "true");
+      ctx = field.getContext("2d", { alpha: true });
+      if (typeof ResizeObserver !== "undefined") observer = new ResizeObserver(resize);
+    }
+    if (!ctx) return;
+    if (sameHost) {
+      if (updatedQuality) { grid = null; resize(); }
+      if (updatedMotion) {
+        cancelAnimationFrame(frame);
+        previous = 0;
+        if (!still) frame = requestAnimationFrame(tick);
+      }
+      if (still) paint(16.7);
+      return;
+    }
     stop();
     host = next;
-    still = reduced;
-    if (!host) return;
-    if (!canvas) init();
-    host.classList.toggle("wave-fallback", !gl);
-    if (!gl) return;
-    host.append(canvas);
-    observer ??= new ResizeObserver(resize);
-    observer.observe(host);
-    active = true;
+    grid = ripple = null;
+    age = level = 0;
+    chatMix = kind === "chat" ? 1 : 0;
+    textMix = populated ? 1 : 0;
+    running = true;
+    host.append(field);
+    observer?.observe(host);
     resize();
-    if (!still) frame = requestAnimationFrame(loop);
+    if (!still) frame = requestAnimationFrame(tick);
   }
 
-  document.addEventListener("visibilitychange", () => {
-    cancelAnimationFrame(frame);
-    last = 0;
-    if (!document.hidden && active && !still) frame = requestAnimationFrame(loop);
-  });
+  function state(next, value = 0) {
+    const changed = mode !== next;
+    mode = next;
+    level = clamp(value);
+    if (changed && still) paint(16.7);
+  }
 
-  return { mount, stop };
+  function pulse(x, y) {
+    if (!running || still || !width || !height) return;
+    ripple = { x: clamp(x / width), y: clamp(y / height), since: clock };
+    preparePulse();
+  }
+
+  function visibilityChanged() {
+    cancelAnimationFrame(frame);
+    previous = 0;
+    if (!document.hidden && window.cortexAppVisible !== false && running && !still) frame = requestAnimationFrame(tick);
+  }
+  document.addEventListener("visibilitychange", visibilityChanged);
+  addEventListener("cortex-app-visibility", visibilityChanged);
+
+  return { duration, mount, stop, state, pulse, restart };
 })();

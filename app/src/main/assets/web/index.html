@@ -4,25 +4,43 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#000000">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://openrouter.ai; form-action 'none'; base-uri 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
   <title>CORTEX</title>
   <link rel="icon" href="art/mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
   <script defer src="icons.js"></script>
+  <script defer src="vendor/markdown-it-15.0.3.js"></script>
+  <script defer src="markdown.js"></script>
+  <script defer src="tool-catalog.js"></script>
+  <script defer src="phone.js"></script>
   <script defer src="model.js"></script>
-  <script defer src="openrouter.js"></script>
+  <script defer src="gateway.js"></script>
   <script defer src="wave.js"></script>
   <script defer src="screens.js"></script>
+  <script defer src="transitions.js"></script>
   <script defer src="app.js"></script>
+  <script defer src="setup.js"></script>
 </head>
 <body>
   <main class="app-shell" id="app" aria-label="CORTEX">
+    <div id="ambient" class="ambient" aria-hidden="true"></div>
     <div id="screen" class="screen"></div>
+    <div id="composition" class="composition" hidden></div>
     <nav id="navigation" class="navigation" aria-label="Основная навигация"></nav>
+    <button type="button" id="jump-latest" class="jump-latest" hidden aria-label="Перейти к последним сообщениям">
+      <span aria-hidden="true">↓</span> К последним
+    </button>
     <div id="splash" class="splash" role="status" aria-label="Загрузка CORTEX">
-      <div class="splash-field wave-field" data-wave-host></div>
-      <img class="splash-wordmark" src="art/wordmark.svg" alt="CORTEX">
+      <div class="splash-field" data-splash-host aria-hidden="true"></div>
+      <div class="launch-lockup" aria-hidden="true">
+        <div class="launch-lens">
+          <div class="launch-mark"></div>
+          <div class="launch-shine"></div>
+        </div>
+        <span class="splash-wordmark">CORTEX</span>
+      </div>
     </div>
+    <dialog class="history-drawer" id="history" aria-labelledby="history-title"></dialog>
     <dialog class="sheet" id="sheet" aria-labelledby="sheet-title"></dialog>
     <div id="toast" class="toast" role="status" hidden></div>
     <noscript>Для работы CORTEX включите JavaScript.</noscript>
