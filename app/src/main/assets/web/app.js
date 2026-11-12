@@ -687,6 +687,30 @@
   }
 
   const clock = new Intl.DateTimeFormat("ru-RU", { dateStyle: "full", timeStyle: "short" });
+  function profileChain() {
+    const start = S.preferences.model;
+    const order = start === "fast" ? ["fast", "auto", "deep"] : start === "deep" ? ["deep", "auto", "fast"] : ["auto", "fast", "deep"];
+    return [...new Set(order)].filter(value => Object.hasOwn(M.models, value));
+  }
+
+  function reserveError(code) {
+    return ["provider_limit", "provider_balance", "provider_access", "model", "provider"].includes(code);
+  }
+
+  function quickCompose(text, submit = true) {
+    const value = String(text || "").trim();
+    const chat = route === "chat" ? (current() || M.createChat()) : homeChat();
+    if (!chat) return;
+    if (route !== "chat" || chatId !== chat.id) navigate("chat", { id: chat.id });
+    setTimeout(() => {
+      if (document.hidden) return;
+      input.focus();
+      if (!value) { syncComposer(); return; }
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      if (submit) input.form?.requestSubmit();
+    }, 420);
+  }
   async function askModel(chat, job, explain, observations, repair = false) {
     if (device && !connection.checked && connectionLoad) await Promise.race([connectionLoad, wait(12_000)]);
     const enabled = Boolean(device && connection.tools && S.preferences.phoneActions && !job.screen);
@@ -695,25 +719,43 @@
     const screenPolicy = job.screen ? "\n\nПользователь приложил текст экрана как данные для разбора: " + JSON.stringify(job.screen) : "";
     const repairPolicy = repair ? "\n\nПредыдущий ответ описал действие словами без вызова. Проверь запрос пользователя. Вызови функцию для нужного действия или answer_without_action, если нужно пояснение или уточнение." : "";
     const messages = M.turns(chat, policy + screenPolicy + repairPolicy);
-    const response = await Api.request("chat", {
-      payload: { messages, style: M.profile().style,
-        ...(enabled && !explain && { device_tools: true, ...(repair && connection.repair && { repair_tools: true }) }),
-        ...(connection.profiles && { profile: S.preferences.model }) },
-      notify: S.preferences.notifyReplies
-    }, {
-      signal: job.controller.signal,
-      onDelta(delta) {
-        if (pending !== job) return;
-        job.raw = (job.raw || "") + delta;
-        if (enabled && !explain && (job.raw.length < 25 || Phone.claimsAction(job.raw))) return;
-        job.text = job.raw;
-        // Long Markdown replies are costly to parse. Adaptive batching keeps typing fluid.
-        const cadence = job.raw.length > 12000 ? 260 : job.raw.length > 3500 ? 155 : 78;
-        if (!job.renderTimer) job.renderTimer = setTimeout(() => { job.renderTimer = 0; drawDelta(job); }, cadence);
+    const profiles = connection.profiles ? profileChain() : [null];
+    let lastError = null;
+    for (let index = 0; index < profiles.length; index++) {
+      const profile = profiles[index];
+      try {
+        const response = await Api.request("chat", {
+          payload: { messages, style: M.profile().style,
+            ...(enabled && !explain && { device_tools: true, ...(repair && connection.repair && { repair_tools: true }) }),
+            ...(connection.profiles && profile && { profile }) },
+          notify: S.preferences.notifyReplies
+        }, {
+          signal: job.controller.signal,
+          onDelta(delta) {
+            if (pending !== job) return;
+            job.raw = (job.raw || "") + delta;
+            if (enabled && !explain && (job.raw.length < 25 || Phone.claimsAction(job.raw))) return;
+            job.text = job.raw;
+            const cadence = job.raw.length > 12000 ? 260 : job.raw.length > 3500 ? 155 : 78;
+            if (!job.renderTimer) job.renderTimer = setTimeout(() => { job.renderTimer = 0; drawDelta(job); }, cadence);
+          }
+        });
+        if (!enabled || explain) return { text: typeof response.text === "string" ? response.text : "", commands: [] };
+        return Phone.decode(response);
+      } catch (error) {
+        lastError = error;
+        const nextProfile = profiles[index + 1];
+        if (!nextProfile || !reserveError(error?.code) || job.controller.signal.aborted) throw error;
+        clearTimeout(job.renderTimer);
+        job.renderTimer = 0;
+        job.raw = "";
+        job.text = "";
+        job.action = "Переключаюсь на резервный ИИ…";
+        if (S.preferences.overlayMode !== "off") sendDevice("island-state", { phase: "executing", message: job.action });
+        if (activeChat(job)) render({ bottom: true });
       }
-    });
-    if (!enabled || explain) return { text: typeof response.text === "string" ? response.text : "", commands: [] };
-    return Phone.decode(response);
+    }
+    throw lastError || Api.failure("model");
   }
 
   async function respond(chat, job, explain) {
@@ -1189,6 +1231,9 @@
     }
     if (message.type === "wake" && typeof message.text === "string") {
       window.CortexSetup?.wake(message);
+    }
+    if (message.type === "quick-compose" && typeof message.text === "string") {
+      quickCompose(message.text, true);
     }
     if (message.type === "wake-config" && !message.ok) {
       S.preferences.hotwordEnabled = false; saved(); render();

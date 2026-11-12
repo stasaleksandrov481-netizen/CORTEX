@@ -27,6 +27,7 @@ class MainActivity : Activity() {
     private lateinit var speech: CortexSpeech
     private lateinit var island: CortexIslandBridge
     private var pendingWake: String? = null
+    private var pendingQuickCompose: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +52,7 @@ class MainActivity : Activity() {
                 override fun onPageFinished(view: WebView, url: String?) {
                     // Cold start from the "Cortex" wake word: hand the command to the UI once it is up.
                     pendingWake?.let { command -> pendingWake = null; view.postDelayed({ deliverWake(command) }, 1800) }
+                    pendingQuickCompose?.let { text -> pendingQuickCompose = null; view.postDelayed({ deliverQuickCompose(text) }, 900) }
                 }
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = !isAsset(request.url)
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse {
@@ -85,6 +87,7 @@ class MainActivity : Activity() {
         }
         island = CortexIslandBridge(this, webView, "https://$ASSET_HOST")
         pendingWake = intent?.getStringExtra(WAKE_EXTRA)
+        pendingQuickCompose = intent?.getStringExtra(COMPOSE_EXTRA)
         setContentView(container)
         if (savedInstanceState == null || webView.restoreState(savedInstanceState) == null) {
             webView.loadUrl("https://$ASSET_HOST/assets/web/index.html?android=1")
@@ -107,10 +110,18 @@ class MainActivity : Activity() {
             intent.removeExtra(WAKE_EXTRA)
             webView.postDelayed({ deliverWake(command) }, 350)
         }
+        intent.getStringExtra(COMPOSE_EXTRA)?.let { text ->
+            intent.removeExtra(COMPOSE_EXTRA)
+            webView.postDelayed({ deliverQuickCompose(text) }, 350)
+        }
     }
 
     private fun deliverWake(command: String) {
-        if (command.isNotBlank()) deviceEvent(JSONObject().put("type", "wake").put("text", command))
+        deviceEvent(JSONObject().put("type", "wake").put("text", command))
+    }
+
+    private fun deliverQuickCompose(text: String) {
+        deviceEvent(JSONObject().put("type", "quick-compose").put("text", text))
     }
 
     private fun isAsset(uri: Uri) = uri.scheme == "https" && uri.host == ASSET_HOST && uri.path?.startsWith("/assets/web/") == true
@@ -154,5 +165,6 @@ class MainActivity : Activity() {
     private companion object {
         const val ASSET_HOST = WebViewAssetLoader.DEFAULT_DOMAIN
         const val WAKE_EXTRA = "cortex_wake_command"
+        const val COMPOSE_EXTRA = "cortex_submit_text"
     }
 }

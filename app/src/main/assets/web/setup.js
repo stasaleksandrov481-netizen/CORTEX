@@ -168,16 +168,18 @@ window.CortexSetup = (() => {
   }
   function autoStart() { start(false); }
   function wake(data) {
-    if (!data?.text) return;
-    const text = String(data.text).trim().replace(/^(кортекс|cortex)[,.!\s]*/iu, '').trim();
-    if (!text) return;
-    // A native wake-word detection may supply a command. Start the visible conversation;
-    // never pretend it has executed until the tool layer reports success.
+    const raw = String(data?.text || '').trim();
+    const text = raw.replace(/^(?:эй[,.!\s-]*)?(?:кортекс|кортэкс|кортексу|cortex)[,.!\s-]*/iu, '').trim();
     const tab = document.querySelector('[data-action="go"][data-value="chat"], [data-tab="chat"]');
     tab?.click();
     setTimeout(() => {
       const input = document.getElementById('composer-input');
       if (!input || document.hidden) return;
+      input.focus();
+      if (!text) {
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+        return;
+      }
       input.value = text; input.dispatchEvent(new Event('input',{bubbles:true}));
       input.form?.requestSubmit();
     },420);

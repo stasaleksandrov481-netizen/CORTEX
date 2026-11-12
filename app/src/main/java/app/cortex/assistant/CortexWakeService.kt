@@ -70,6 +70,7 @@ class CortexWakeService : Service(), RecognitionListener {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
         runCatching { recognizer?.startListening(intent) }.onFailure { postpone() }
@@ -85,37 +86,46 @@ class CortexWakeService : Service(), RecognitionListener {
     private fun accept(text: String) {
         val trimmed = text.trim()
         val now = SystemClock.elapsedRealtime()
-        val match = Regex("^(?:кортекс|кортэкс|кортекст|картекс|кортикс|cortex)(?:[\\s,.:;!?-]+(.*))?$", RegexOption.IGNORE_CASE).find(trimmed)
+        val direct = Regex("""^(?:эй[\s,.-]*)?(?:кортекс|кортэкс|кортексу|кортекст|картекс|кортикс|cortex)(?:[\s,.:;!?-]+(.*))?$""", RegexOption.IGNORE_CASE).find(trimmed)
+        val anywhere = if (direct == null) Regex("""(?:^|\b)(?:кортекс|кортэкс|кортексу|кортекст|картекс|кортикс|cortex)(?:\b|[\s,.:;!?-]+)(.*)?$""", RegexOption.IGNORE_CASE).find(trimmed) else null
+        val match = direct ?: anywhere
         val command: String
         if (match != null) {
-            if (now - recent < 1800L) return
+            if (now - recent < 1400L) return
             recent = now
             command = match.groupValues.getOrElse(1) { "" }.trim()
-            // A brief, recognizable local confirmation without speech synthesis.
             runCatching {
                 val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 30)
                 tone.startTone(ToneGenerator.TONE_PROP_ACK, 65)
                 ui.postDelayed({ tone.release() }, 160)
             }
-            awaitingCommandUntil = if (command.isEmpty()) now + 7000L else 0L
+            failures = 0
+            if (command.isEmpty()) {
+                awaitingCommandUntil = now + 7000L
+                CortexIslandService.send(this, CortexIslandService.ACTION_STATUS) {
+                    putExtra(CortexIslandService.EXTRA_PHASE, "listening")
+                    putExtra(CortexIslandService.EXTRA_MESSAGE, "Слушаю команду…")
+                }
+                ui.removeCallbacks(rearm)
+                runCatching { recognizer?.cancel() }
+                ui.postDelayed(rearm, 240)
+                return
+            }
+            awaitingCommandUntil = 0L
         } else {
             if (now > awaitingCommandUntil) return
             awaitingCommandUntil = 0L
             command = trimmed
+            failures = 0
         }
-        failures = 0
         CortexIslandService.send(this,CortexIslandService.ACTION_STATUS) {
-            putExtra(CortexIslandService.EXTRA_PHASE, if (command.isEmpty()) "listening" else "understood")
+            putExtra(CortexIslandService.EXTRA_PHASE, "understood")
             putExtra(CortexIslandService.EXTRA_MESSAGE, command.take(64))
         }
-        // Do not claim execution here. The AI tool layer must execute and confirm the command.
-        // Expose a pending command through an explicit user-visible app/notification integration.
         val open = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("cortex_wake_command", command)
         }
-        // Android 12+ restricts launching apps from background. A notification is required
-        // on devices where this launch is disallowed; do not attempt to bypass the restriction.
         runCatching { startActivity(open) }
     }
     override fun onResults(results: Bundle?) {
@@ -123,7 +133,8 @@ class CortexWakeService : Service(), RecognitionListener {
         ui.postDelayed(rearm, 900)
     }
     override fun onPartialResults(partialResults: Bundle?) {
-        // Waiting for the final recognition to avoid acting on false-positive partial phrases.
+        if (CortexRuntime.foreground) return
+        partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.takeIf { it.isNotBlank() }?.let(::accept)
     }
     override fun onError(error: Int) { postpone() }
     override fun onReadyForSpeech(params: Bundle?) = Unit

@@ -3,7 +3,7 @@
 const CortexUI = (() => {
   const M = Cortex;
   const icon = CortexIcons;
-  const version = "0.8.8";
+  const version = "0.8.6";
   const tabs = [
     ["chat", "Чат", "message"], ["phone-tools", "Вызов", "bolt"], ["home", "Кортекс", ""],
     ["notes", "Заметки", "note"], ["profile", "Профиль", "user"]
@@ -73,7 +73,8 @@ const CortexUI = (() => {
         ${iconButton("stop", "Завершить запись", "voice-turn", "", "voice-control")}
         ${iconButton("close", "Закончить голосовой режим", "voice-close", "", "voice-close")}
       </div>
-      <textarea id="composer-input" name="message" aria-label="Сообщение" rows="1" maxlength="6000" enterkeyhint="enter"></textarea>
+      <textarea id="composer-input" name="message" aria-label="Сообщение" enterkeyhint="enter" rows="1" maxlength="6000"
+        enterkeyhint="send"></textarea>
       <div class="composer-actions">
         <button class="composer-button mic-button" type="button" aria-label="Диктовать сообщение" ${attributes("dictate")}>${icon("mic", 21)}</button>
         <button class="composer-button voice-button" type="button" aria-label="Голосовой разговор" ${attributes("voice-chat")}>${icon("wave", 22)}</button>
