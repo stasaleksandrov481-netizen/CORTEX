@@ -331,7 +331,7 @@ class CortexIslandService : Service() {
             titleRow.addView(close, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
 
             editor.apply {
-                hint = "Напишите команду…"
+                this.hint = "Напишите команду…"
                 setHintTextColor(0x75FFFFFF)
                 setTextColor(Color.WHITE)
                 textSize = 15f
