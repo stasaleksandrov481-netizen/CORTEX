@@ -36,6 +36,7 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
     }
     private var pollCode: String? = null
     private val endpoint = "https://jjcqrjztxohnifmziksy.supabase.co/functions/v1/cortex/v1/"
+    private val cortexPackage = runCatching { context.packageManager.getPackageInfo(context.packageName,0) }.getOrNull()
 
     fun handle(raw: String, reply: JavaScriptReplyProxy) {
         if (raw.length > 270_000) return
@@ -87,6 +88,8 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
     private fun perform(request: JSONObject, id: String, onEvent: (JSONObject) -> Unit): JSONObject {
         return when (request.optString("operation")) {
             "status" -> call("GET", "status", null, id)
+            "presence" -> call("POST", "presence", request.optJSONObject("payload") ?: throw GatewayFailure("invalid"), id)
+            "support-inbox" -> call("GET", "support/inbox", null, id)
             "chat" -> call("POST", "chat", request.optJSONObject("payload") ?: throw GatewayFailure("invalid"), id, onEvent)
             "support" -> call("POST", "support", request.optJSONObject("payload") ?: throw GatewayFailure("invalid"), id)
             "auth-start" -> call("POST", "auth/start", JSONObject(), id).also { pollCode = it.optString("poll") }
@@ -119,6 +122,8 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
             connection.requestMethod = method
             connection.setRequestProperty("Accept", if (onEvent == null) "application/json" else "text/event-stream")
             connection.setRequestProperty("X-Cortex-Install", installId)
+            connection.setRequestProperty("X-Cortex-Version-Code", cortexPackage?.versionCode?.toString() ?: "92")
+            connection.setRequestProperty("X-Cortex-Version-Name", cortexPackage?.versionName ?: "0.9.2")
             connection.setRequestProperty("Cache-Control", "no-store")
             val token = store.get()
             if (!token.isNullOrEmpty()) connection.setRequestProperty("Authorization", "Bearer $token")
