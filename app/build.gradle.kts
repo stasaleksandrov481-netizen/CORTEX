@@ -3,17 +3,26 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val sideBySide = providers.gradleProperty("cortexPreview").map(String::toBoolean).orElse(false)
+
 android {
     namespace = "app.cortex.assistant"
     compileSdk = 36
+    buildToolsVersion = "36.0.0"
     defaultConfig {
         applicationId = "app.cortex.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 89
-        versionName = "0.8.9-hotfix"
+        versionCode = 91
+        versionName = "0.9.1"
     }
     buildTypes {
+        debug {
+            if (sideBySide.get()) {
+                applicationIdSuffix = ".preview"
+                resValue("string", "app_name", "CORTEX 0.9")
+            }
+        }
         release {
             isMinifyEnabled = false
             // Configure your own signing before releasing. Never commit keystores.

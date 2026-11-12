@@ -9,554 +9,419 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.LinearGradient
-import android.graphics.Matrix
-import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.PathMeasure
 import android.graphics.PixelFormat
+import android.graphics.Point
 import android.graphics.Rect
-import android.graphics.RectF
-import android.graphics.Shader
-import android.graphics.SweepGradient
-import android.graphics.Typeface
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.SystemClock
 import android.provider.Settings
-import android.text.InputType
-import android.text.TextPaint
-import android.text.TextUtils
-import android.view.Choreographer
+import android.view.Display
+import android.view.DisplayCutout
 import android.view.Gravity
-import android.view.KeyEvent
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
-import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputMethodManager
-import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.TextView
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
-/**
- * CORTEX island: colorful camera-hugging overlay with a compact floating composer.
- * Tap -> open mini composer. Long press -> open the full app.
- */
-class CortexIslandService : Service() {
+class CortexIslandService : Service(), DisplayManager.DisplayListener {
+    private val ui = Handler(Looper.getMainLooper())
+    private lateinit var overlayContext: Context
+    private lateinit var manager: WindowManager
+    private lateinit var displays: DisplayManager
+    private val preferences by lazy { getSharedPreferences("cortex-display", MODE_PRIVATE) }
+    private val assistantDelegate = lazy { IslandAssistant(this) }
+    private val assistant by assistantDelegate
+    private var island: LiquidIslandView? = null
+    private var window: WindowManager.LayoutParams? = null
+    private var legacyProbe: View? = null
+    private var legacyBars = Rect()
+    private var legacyCutout: DisplayCutout? = null
+    private var screen: IslandScreen? = null
+    private var mode = "off"
+    private var phase = "idle"
+    private var message = ""
+    private var draft = ""
+    private var reply = ""
+    private var opening = false
+    private var moving = false
+    private var busy = false
+
+    private val settleLayout = Runnable { island?.let { placeIsland(it) } }
+    private val returnToIdle = Runnable { updateStatus("idle", "") }
+    private var repaintPending = false
+    private val repaintAnswer = Runnable {
+        repaintPending = false
+        if (busy) render()
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        displays = getSystemService(DisplayManager::class.java)
+        val primary = displays.getDisplay(Display.DEFAULT_DISPLAY)
+        overlayContext = if (Build.VERSION.SDK_INT >= 30 && primary != null) {
+            runCatching { createDisplayContext(primary).createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null) }
+                .getOrDefault(this)
+        } else this
+        manager = overlayContext.getSystemService(WindowManager::class.java)
+        displays.registerDisplayListener(this, ui)
+        val notifications = getSystemService(NotificationManager::class.java)
+        notifications.createNotificationChannel(NotificationChannel(CHANNEL, "CORTEX · островок", NotificationManager.IMPORTANCE_LOW))
+        val pending = PendingIntent.getActivity(this, 32, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val notification = Notification.Builder(this, CHANNEL)
+            .setContentTitle("CORTEX")
+            .setContentText("Островок доступен поверх приложений")
+            .setSmallIcon(R.drawable.ic_cortex)
+            .setContentIntent(pending)
+            .setOngoing(true)
+            .build()
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIFICATION, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            else startForeground(NOTIFICATION, notification)
+        }.onFailure { stopSelf() }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_CONFIG) {
+            val requested = intent.getStringExtra(EXTRA_MODE)
+            if (requested in setOf("always", "wake", "off")) {
+                preferences.edit().putString("mode", requested)
+                    .putBoolean(EXTRA_HIDE_LANDSCAPE, intent.getBooleanExtra(EXTRA_HIDE_LANDSCAPE, true)).apply()
+            }
+        }
+        mode = preferences.getString("mode", "off") ?: "off"
+        if (mode == "off") {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        when (intent?.action) {
+            ACTION_STATUS -> if (!busy && !opening) updateStatus(
+                intent.getStringExtra(EXTRA_PHASE) ?: "idle", intent.getStringExtra(EXTRA_MESSAGE).orEmpty().take(64)
+            )
+            ACTION_WAKE -> if (!busy) {
+                updateStatus("listening", "Слушаю команду…")
+            }
+            ACTION_WAKE_CLOSED -> if (phase == "listening" && !busy) updateStatus("idle", "")
+            ACTION_SUBMIT -> {
+                val text = intent.getStringExtra(EXTRA_MESSAGE).orEmpty()
+                if (text.isNotBlank() && canShow()) {
+                    if (busy) { assistant.cancel(); busy = false }
+                    submit(text, fromVoice = true)
+                }
+            }
+            ACTION_DISMISS -> if (!busy) updateStatus("idle", "")
+            else -> render()
+        }
+        return START_STICKY
+    }
+
+    private fun canShow() = Settings.canDrawOverlays(this) &&
+        (!preferences.getBoolean(EXTRA_HIDE_LANDSCAPE, true) ||
+            resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE)
+
+    private fun updateStatus(state: String, text: String) {
+        ui.removeCallbacks(returnToIdle)
+        phase = state
+        message = text
+        if (!busy) {
+            val delay = when (state) {
+                "done", "error" -> if (reply.isNotBlank()) 12_000L else 2600L
+                "listening" -> 9_000L
+                "understood" -> 12_000L
+                "executing" -> 45_000L
+                else -> 0L
+            }
+            if (delay > 0) ui.postDelayed(returnToIdle, delay)
+        }
+        render()
+    }
+
+    private fun render() {
+        if (!canShow() || (mode == "wake" && phase == "idle" && !opening && !moving)) {
+            removeIsland()
+            return
+        }
+        if (Build.VERSION.SDK_INT in 26..28 && legacyProbe == null) watchLegacyInsets()
+        val geometryChanged = screen == null
+        val nextScreen = screen ?: measureScreen().also { screen = it }
+        val visible = island ?: createIsland(nextScreen) ?: return
+        val label = when (phase) {
+            "listening" -> message.ifBlank { "Слушаю…" }
+            "executing" -> message.ifBlank { "Думаю…" }
+            "done" -> if (reply.isNotBlank()) "Ответ готов" else "Готово"
+            "error" -> if (reply.isNotBlank()) "Открыть ответ" else message.ifBlank { "Не удалось выполнить" }
+            "understood" -> message
+            else -> ""
+        }
+        val wasStatus = visible.tag == true
+        visible.tag = label.isNotEmpty()
+        visible.phase(phase, label)
+        visible.haptics = preferences.getBoolean("haptics", true)
+        visible.reduceMotion(preferences.getBoolean("reduceMotion", false))
+        visible.conversation.status(phase, label)
+        visible.conversation.busy(busy)
+        val answerResized = visible.conversation.answer(reply)
+        if (geometryChanged || wasStatus != (label.isNotEmpty()) || answerResized) {
+            placeIsland(visible, deform = !geometryChanged && !moving)
+        }
+    }
+
+    private fun createIsland(currentScreen: IslandScreen): LiquidIslandView? {
+        val panel = IslandConversationPanel(overlayContext, { submit(it) }, ::stopAnswer,
+            { setExpanded(false) }, ::openApplication)
+        panel.draft(draft)
+        val view = LiquidIslandView(overlayContext, panel, { setExpanded(true, focus = true) },
+            { setExpanded(false) }, ::openApplication)
+        screen = currentScreen
+        val params = layoutParams()
+        window = params
+        placeIsland(view, update = false)
+        return runCatching { manager.addView(view, params); view }.onSuccess { island = it }
+            .onFailure { window = null }.getOrNull()
+    }
+
+    private fun setExpanded(open: Boolean, focus: Boolean = false) {
+        val view = island ?: return
+        if (open == opening) {
+            if (focus) view.conversation.focusEditor()
+            return
+        }
+        ui.removeCallbacks(settleLayout)
+        opening = open
+        moving = true
+        if (!open) view.conversation.hideKeyboard()
+        placeIsland(view)
+        view.expand(open, !preferences.getBoolean("reduceMotion", false)) {
+            moving = false
+            placeIsland(view)
+            if (open && focus) view.conversation.focusEditor()
+            if (!open && phase == "idle") render()
+        }
+    }
+
+    private fun placeIsland(view: LiquidIslandView, update: Boolean = true, deform: Boolean = false) {
+        val viewport = screen ?: return
+        val lp = window ?: return
+        val d = view.resources.displayMetrics.density
+        val safe = viewport.safeArea(d)
+        val panelWidth = minOf(safe.width(), 294 * d).roundToInt().coerceAtLeast(1)
+        view.conversation.measure(View.MeasureSpec.makeMeasureSpec(panelWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(safe.height().roundToInt().coerceAtLeast(1), View.MeasureSpec.AT_MOST))
+        val placement = IslandPlacement(viewport, d, view.tag == true, panelWidth, view.conversation.measuredHeight)
+        val box = Rect(placement.frame(opening, moving))
+        val previous = Rect(lp.x + viewport.bounds.left, lp.y + viewport.bounds.top,
+            lp.x + lp.width + viewport.bounds.left, lp.y + lp.height + viewport.bounds.top)
+        val transition = deform && !previous.isEmpty && box != previous &&
+            !preferences.getBoolean("reduceMotion", false) && android.animation.ValueAnimator.areAnimatorsEnabled()
+        if (transition) {
+            box.union(previous)
+            ui.removeCallbacks(settleLayout)
+            ui.postDelayed(settleLayout, LiquidIslandView.GEOMETRY_MS)
+        }
+        view.place(placement, box, transition)
+        val flags = windowFlags(if (moving) opening || view.hasWindowFocus() else opening)
+        if (box == previous && flags == lp.flags) return
+        lp.width = box.width().coerceAtLeast(1)
+        lp.height = box.height().coerceAtLeast(1)
+        lp.x = box.left - viewport.bounds.left
+        lp.y = box.top - viewport.bounds.top
+        lp.flags = flags
+        if (update && view.isAttachedToWindow) runCatching { manager.updateViewLayout(view, lp) }
+    }
+
+    private fun submit(raw: String, fromVoice: Boolean = false) {
+        val text = raw.trim().take(600)
+        if (busy || text.isEmpty()) return
+        if (fromVoice) island?.conversation?.hideKeyboard()
+        busy = true
+        reply = ""
+        updateStatus("executing", "Думаю…")
+        setExpanded(true)
+        val streamed = StringBuilder()
+        assistant.send(text, preferences.getString("profile", "auto") ?: "auto",
+            toolsAllowed = { preferences.getBoolean("phoneActions", true) && Settings.canDrawOverlays(this) },
+            progress = { updateStatus("executing", it) },
+            delta = { chunk ->
+                if (streamed.length < 20_000) {
+                    streamed.append(chunk.take(20_000 - streamed.length))
+                    reply = streamed.toString()
+                    message = "Отвечаю…"
+                    if (!repaintPending) {
+                        repaintPending = true
+                        ui.postDelayed(repaintAnswer, 65)
+                    }
+                }
+            },
+            finished = { answer, ok ->
+                busy = false
+                reply = answer.trim()
+                updateStatus(if (ok) "done" else "error", "")
+            })
+    }
+
+    private fun stopAnswer() {
+        if (!busy) return
+        assistant.cancel()
+        busy = false
+        if (reply.isBlank()) reply = "Ответ остановлен."
+        updateStatus("done", "")
+    }
+
+    private fun openApplication() {
+        setExpanded(false)
+        runCatching {
+            startActivity(Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+        }
+    }
+
+    private fun layoutParams(touchable: Boolean = true): WindowManager.LayoutParams =
+        WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            if (touchable) windowFlags(false) else windowFlags(false) or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.LEFT
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING or WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED
+            if (Build.VERSION.SDK_INT >= 30) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                setFitInsetsTypes(0)
+                setFitInsetsSides(0)
+            } else if (Build.VERSION.SDK_INT >= 28) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+
+    @Suppress("DEPRECATION")
+    private fun windowFlags(focus: Boolean): Int =
+        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+            (if (Build.VERSION.SDK_INT < 30) WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS else 0) or
+            (if (focus) WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+
+    @Suppress("DEPRECATION")
+    private fun measureScreen(): IslandScreen {
+        if (Build.VERSION.SDK_INT >= 30) {
+            val metrics = manager.maximumWindowMetrics
+            val bars = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars())
+            val cutout = manager.defaultDisplay.cutout ?: metrics.windowInsets.displayCutout
+            val waterfall = cutout?.waterfallInsets
+            return IslandScreen(Rect(metrics.bounds), Rect(maxOf(bars.left, waterfall?.left ?: 0),
+                maxOf(bars.top, waterfall?.top ?: 0), maxOf(bars.right, waterfall?.right ?: 0),
+                maxOf(bars.bottom, waterfall?.bottom ?: 0)), cutouts(cutout, metrics.bounds))
+        }
+        val display = manager.defaultDisplay
+        val size = Point()
+        display.getRealSize(size)
+        val bounds = Rect(0, 0, size.x, size.y)
+        val cutout = if (Build.VERSION.SDK_INT >= 29) display.cutout else legacyCutout
+        val status = resources.getIdentifier("status_bar_height", "dimen", "android")
+            .takeIf { it != 0 }?.let(resources::getDimensionPixelSize) ?: (24 * resources.displayMetrics.density).roundToInt()
+        val bars = Rect(legacyBars).apply {
+            top = maxOf(top, status)
+            if (bottom == 0) bottom = (24 * resources.displayMetrics.density).roundToInt()
+        }
+        return IslandScreen(bounds, bars, cutouts(cutout, bounds))
+    }
+
+    private fun cutouts(value: DisplayCutout?, bounds: Rect): List<IslandCutout> {
+        if (value == null || Build.VERSION.SDK_INT < 28) return emptyList()
+        val contour = if (Build.VERSION.SDK_INT >= 31) value.cutoutPath else null
+        if (Build.VERSION.SDK_INT >= 29) return listOf(
+            Gravity.TOP to value.boundingRectTop, Gravity.LEFT to value.boundingRectLeft,
+            Gravity.RIGHT to value.boundingRectRight, Gravity.BOTTOM to value.boundingRectBottom
+        ).filterNot { (_, rect) -> rect.isEmpty }.map { (edge, rect) -> IslandCutout(edge, rect, contour) }
+        return value.boundingRects.map { rect ->
+            val edge = listOf(
+                Gravity.TOP to rect.top - bounds.top, Gravity.LEFT to rect.left - bounds.left,
+                Gravity.RIGHT to bounds.right - rect.right, Gravity.BOTTOM to bounds.bottom - rect.bottom
+            ).minBy { it.second }.first
+            IslandCutout(edge, rect)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun watchLegacyInsets() {
+        val probe = View(overlayContext)
+        probe.setOnApplyWindowInsetsListener { _, insets ->
+            val bars = Rect(insets.stableInsetLeft, insets.stableInsetTop, insets.stableInsetRight, insets.stableInsetBottom)
+            val cutout = if (Build.VERSION.SDK_INT >= 28) insets.displayCutout else null
+            if (bars != legacyBars || cutout != legacyCutout) {
+                legacyBars = bars
+                legacyCutout = cutout
+                screen = null
+                ui.post(::render)
+            }
+            insets
+        }
+        val params = layoutParams(false).apply {
+            width = WindowManager.LayoutParams.MATCH_PARENT
+            height = WindowManager.LayoutParams.MATCH_PARENT
+            alpha = 0f
+        }
+        runCatching { manager.addView(probe, params); legacyProbe = probe }
+    }
+
+    private fun removeIsland() {
+        ui.removeCallbacks(settleLayout)
+        island?.let { view ->
+            draft = view.conversation.draft()
+            view.conversation.hideKeyboard()
+            runCatching { manager.removeViewImmediate(view) }
+        }
+        island = null
+        window = null
+        opening = false
+        moving = false
+        legacyProbe?.let { runCatching { manager.removeViewImmediate(it) } }
+        legacyProbe = null
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        screen = null
+        ui.post(::render)
+    }
+
+    override fun onDisplayChanged(displayId: Int) {
+        if (displayId != Display.DEFAULT_DISPLAY) return
+        screen = null
+        ui.post(::render)
+    }
+    override fun onDisplayAdded(displayId: Int) = Unit
+    override fun onDisplayRemoved(displayId: Int) = Unit
+    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onDestroy() {
+        displays.unregisterDisplayListener(this)
+        ui.removeCallbacksAndMessages(null)
+        removeIsland()
+        if (assistantDelegate.isInitialized()) assistant.close()
+        super.onDestroy()
+    }
+
     companion object {
         const val ACTION_CONFIG = "app.cortex.assistant.island.CONFIG"
         const val ACTION_STATUS = "app.cortex.assistant.island.STATUS"
         const val ACTION_ENSURE = "app.cortex.assistant.island.ENSURE"
         const val ACTION_DISMISS = "app.cortex.assistant.island.DISMISS"
+        const val ACTION_WAKE = "app.cortex.assistant.island.WAKE"
+        const val ACTION_WAKE_CLOSED = "app.cortex.assistant.island.WAKE_CLOSED"
+        const val ACTION_SUBMIT = "app.cortex.assistant.island.SUBMIT"
         const val EXTRA_MODE = "mode"
         const val EXTRA_HIDE_LANDSCAPE = "hideLandscape"
         const val EXTRA_PHASE = "phase"
         const val EXTRA_MESSAGE = "message"
         private const val CHANNEL = "cortex-island"
         private const val NOTIFICATION = 2810
+
         fun send(context: Context, action: String, extras: Intent.() -> Unit = {}) {
             val intent = Intent(context, CortexIslandService::class.java).apply { this.action = action; extras() }
-            try { context.startService(intent) } catch (_: Exception) { }
+            runCatching { context.startService(intent) }
         }
-    }
-
-    private lateinit var manager: WindowManager
-    private val ui = Handler(Looper.getMainLooper())
-    private var island: IslandView? = null
-    private var composer: ComposerBubble? = null
-    private var mode = "off"
-    private var hideLandscape = true
-    private var phase = "idle"
-    private var message = ""
-
-    private val resetToIdle = Runnable { phase = "idle"; message = ""; render() }
-    private val hideIfIdle = Runnable { if (!shouldShow()) removeIsland() }
-
-    override fun onCreate() {
-        super.onCreate()
-        manager = getSystemService(WINDOW_SERVICE) as WindowManager
-        loadPrefs()
-        ensureChannel()
-        val open = Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP }
-        val pending = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        val notification = Notification.Builder(this, CHANNEL)
-            .setContentTitle("CORTEX")
-            .setContentText("Островок включён. Нажмите, чтобы ввести команду.")
-            .setSmallIcon(android.R.drawable.ic_menu_info_details)
-            .setContentIntent(PendingIntent.getActivity(this, 32, open, pending))
-            .setOngoing(true)
-            .build()
-        val started = runCatching {
-            if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIFICATION, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-            else startForeground(NOTIFICATION, notification)
-        }.isSuccess
-        if (!started) { stopSelf(); return }
-        render()
-    }
-
-    private fun loadPrefs() {
-        val store = getSharedPreferences("cortex-display", MODE_PRIVATE)
-        mode = store.getString("mode", "off") ?: "off"
-        hideLandscape = store.getBoolean("hideLandscape", true)
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_CONFIG -> {
-                val newMode = intent.getStringExtra(EXTRA_MODE) ?: mode
-                if (newMode in listOf("always", "wake", "off")) mode = newMode
-                hideLandscape = intent.getBooleanExtra(EXTRA_HIDE_LANDSCAPE, true)
-                getSharedPreferences("cortex-display", MODE_PRIVATE).edit()
-                    .putString("mode", mode).putBoolean("hideLandscape", hideLandscape).apply()
-                if (mode == "off") { stopSelf(); return START_NOT_STICKY }
-                setPhase("idle", "")
-            }
-            ACTION_ENSURE -> {
-                loadPrefs()
-                if (mode == "off") { stopSelf(); return START_NOT_STICKY }
-                render()
-            }
-            ACTION_STATUS -> {
-                loadPrefs()
-                if (mode == "off") { stopSelf(); return START_NOT_STICKY }
-                setPhase(intent.getStringExtra(EXTRA_PHASE) ?: "idle", intent.getStringExtra(EXTRA_MESSAGE).orEmpty().take(64))
-            }
-            ACTION_DISMISS -> setPhase("idle", "")
-        }
-        return if (mode == "off") START_NOT_STICKY else START_STICKY
-    }
-
-    private fun setPhase(newPhase: String, newMessage: String) {
-        phase = newPhase
-        message = newMessage
-        ui.removeCallbacks(resetToIdle)
-        when (phase) {
-            "done", "error" -> ui.postDelayed(resetToIdle, 2600)
-            "listening", "understood" -> ui.postDelayed(resetToIdle, 12_000)
-            "executing" -> ui.postDelayed(resetToIdle, 45_000)
-        }
-        render()
-    }
-
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        removeComposer()
-        removeIsland()
-        render()
-    }
-
-    private fun landscape() = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-    private fun shouldShow() = mode == "always" || (mode == "wake" && phase != "idle")
-
-    private fun label() = when (phase) {
-        "listening" -> if (message.isNotBlank()) message else "Слушаю…"
-        "understood" -> message.ifBlank { "Понял" }
-        "executing" -> message.ifBlank { "Выполняю…" }
-        "done" -> "Готово"
-        "error" -> message.ifBlank { "Не удалось выполнить" }
-        else -> ""
-    }
-
-    private fun render() {
-        if (!Settings.canDrawOverlays(this) || (hideLandscape && landscape())) { removeComposer(); removeIsland(); return }
-        if (shouldShow()) {
-            ui.removeCallbacks(hideIfIdle)
-            if (island == null) createIsland()
-            island?.setState(phase, label())
-        } else if (island != null) {
-            island?.setState("idle", "")
-            ui.removeCallbacks(hideIfIdle)
-            ui.postDelayed(hideIfIdle, 420)
-        }
-    }
-
-    private fun cameraRect(): Rect? {
-        if (Build.VERSION.SDK_INT < 30) return null
-        val cutout = runCatching { manager.currentWindowMetrics.windowInsets.displayCutout }.getOrNull() ?: return null
-        val top = cutout.boundingRectTop
-        return if (top.width() > 0 && top.height() > 0) top else null
-    }
-
-    private fun createIsland() {
-        val density = resources.displayMetrics.density
-        val screenW = resources.displayMetrics.widthPixels
-        val cam = cameraRect()
-        val view = IslandView(this, cam?.width() ?: 0, cam?.height() ?: 0)
-        view.setOnClickListener { toggleComposer() }
-        view.setOnLongClickListener { launchApp(); true }
-        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
-        val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            if (Build.VERSION.SDK_INT >= 30) layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-            else if (Build.VERSION.SDK_INT >= 28) layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            x = if (cam != null) (cam.exactCenterX() - screenW / 2f).roundToInt() else 0
-            y = if (cam != null) max(0, cam.top - (4 * density).roundToInt()) else (8 * density).roundToInt()
-        }
-        try { manager.addView(view, lp); island = view } catch (_: Exception) { island = null }
-    }
-
-    private fun toggleComposer() {
-        if (composer != null) removeComposer() else showComposer()
-    }
-
-    private fun showComposer() {
-        if (composer != null || island == null) return
-        val density = resources.displayMetrics.density
-        val width = min((resources.displayMetrics.widthPixels * 0.92f).roundToInt(), (360 * density).roundToInt())
-        val bubble = ComposerBubble(this,
-            onSend = { text -> submitCompose(text) },
-            onClose = { removeComposer() },
-            onOpenFull = { launchApp() }
-        )
-        val lp = WindowManager.LayoutParams(
-            width, WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            if (Build.VERSION.SDK_INT >= 30) layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-            else if (Build.VERSION.SDK_INT >= 28) layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            y = (cameraRect()?.bottom ?: (20 * density).roundToInt()) + (18 * density).roundToInt()
-        }
-        try {
-            manager.addView(bubble, lp)
-            composer = bubble
-            bubble.focusEditor()
-        } catch (_: Exception) {
-            composer = null
-        }
-    }
-
-    private fun submitCompose(text: String) {
-        val clean = text.trim().take(600)
-        if (clean.isBlank()) return
-        removeComposer()
-        setPhase("understood", clean.take(64))
-        launchApp(clean)
-    }
-
-    private fun removeComposer() {
-        composer?.hideKeyboard()
-        composer?.let { runCatching { manager.removeView(it) } }
-        composer = null
-    }
-
-    private fun removeIsland() {
-        ui.removeCallbacks(hideIfIdle)
-        removeComposer()
-        island?.let { it.stop(); runCatching { manager.removeView(it) } }
-        island = null
-    }
-
-    private fun launchApp(quickText: String? = null) {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            if (!quickText.isNullOrBlank()) putExtra("cortex_submit_text", quickText)
-        }
-        try { startActivity(intent) } catch (_: Exception) {}
-    }
-
-    private fun ensureChannel() {
-        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-            .createNotificationChannel(NotificationChannel(CHANNEL, "CORTEX · островок", NotificationManager.IMPORTANCE_LOW))
-    }
-
-    override fun onDestroy() { ui.removeCallbacksAndMessages(null); removeComposer(); removeIsland(); super.onDestroy() }
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    private class ComposerBubble(
-        context: Context,
-        private val onSend: (String) -> Unit,
-        private val onClose: () -> Unit,
-        private val onOpenFull: () -> Unit
-    ) : LinearLayout(context) {
-        private val d = resources.displayMetrics.density
-        private val rim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2.2f * d }
-        private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(248, 8, 10, 16) }
-        private val rect = RectF()
-        private val shader = LinearGradient(0f, 0f, 600f, 0f,
-            intArrayOf(0xFF5EE7FF.toInt(), 0xFF7AA2FF.toInt(), 0xFFB28DFF.toInt(), 0xFFFF7AC6.toInt(), 0xFFFFB65E.toInt()), null, Shader.TileMode.CLAMP)
-        private val editor = EditText(context)
-
-        init {
-            orientation = VERTICAL
-            setWillNotDraw(false)
-            setPadding((14 * d).roundToInt(), (14 * d).roundToInt(), (14 * d).roundToInt(), (14 * d).roundToInt())
-            clipToPadding = false
-            clipChildren = false
-            elevation = 24 * d
-
-            val titleRow = LinearLayout(context).apply {
-                orientation = HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val title = TextView(context).apply {
-                text = "CORTEX"
-                setTextColor(Color.WHITE)
-                textSize = 13f
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            }
-            val hint = TextView(context).apply {
-                text = "  Мини-команда"
-                setTextColor(0xB3FFFFFF.toInt())
-                textSize = 12f
-            }
-            val close = ImageView(context).apply {
-                setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
-                setColorFilter(Color.WHITE)
-                setPadding((8 * d).roundToInt(), (8 * d).roundToInt(), (2 * d).roundToInt(), (8 * d).roundToInt())
-                setOnClickListener { onClose() }
-            }
-            titleRow.addView(title, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-            titleRow.addView(hint, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
-            titleRow.addView(close, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
-
-            editor.apply {
-                this.hint = "Напишите команду…"
-                setHintTextColor(0x75FFFFFF)
-                setTextColor(Color.WHITE)
-                textSize = 15f
-                background = null
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                imeOptions = EditorInfo.IME_ACTION_SEND
-                isSingleLine = false
-                maxLines = 3
-                setPadding((2 * d).roundToInt(), (8 * d).roundToInt(), (2 * d).roundToInt(), (8 * d).roundToInt())
-                setOnEditorActionListener { _, actionId, event ->
-                    val enter = event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN
-                    if (actionId == EditorInfo.IME_ACTION_SEND || enter) {
-                        onSend(text.toString())
-                        true
-                    } else false
-                }
-            }
-
-            val actionRow = LinearLayout(context).apply {
-                orientation = HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val openFull = TextView(context).apply {
-                text = "Открыть полностью"
-                setTextColor(0xCCFFFFFF.toInt())
-                textSize = 12f
-                setOnClickListener { onOpenFull() }
-            }
-            val send = TextView(context).apply {
-                text = "Отправить"
-                setTextColor(Color.WHITE)
-                setTextSize(14f)
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                setPadding((14 * d).roundToInt(), (9 * d).roundToInt(), (14 * d).roundToInt(), (9 * d).roundToInt())
-                background = null
-                setOnClickListener { onSend(editor.text.toString()) }
-            }
-            actionRow.addView(openFull, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-            actionRow.addView(send, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
-
-            addView(titleRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-            addView(editor, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-            addView(actionRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            val radius = 22 * d
-            rect.set(1.2f * d, 1.2f * d, width.toFloat() - 1.2f * d, height.toFloat() - 1.2f * d)
-            canvas.drawRoundRect(rect, radius, radius, bg)
-            rim.shader = shader
-            rim.alpha = 235
-            canvas.drawRoundRect(rect, radius, radius, rim)
-        }
-
-        fun focusEditor() {
-            post {
-                editor.requestFocus()
-                (context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
-                    ?.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT)
-            }
-        }
-
-        fun hideKeyboard() {
-            (context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
-                ?.hideSoftInputFromWindow(windowToken, 0)
-        }
-    }
-
-    private class IslandView(context: Context, camW: Int, camH: Int) : View(context) {
-        private val d = resources.displayMetrics.density
-        private val baseH = if (camH > 0) camH + 8 * d else 30 * d
-        private val baseW = if (camW > 0) camW + 18 * d else 84 * d
-        private val rowH = 44 * d
-        private val pad = 16 * d
-        private val glyphZone = 38 * d
-        private val maxW = min(resources.displayMetrics.widthPixels * 0.92f, 338 * d)
-        private val minOpenW = 205 * d
-
-        private var phase = "idle"
-        private var glyphPhase = "idle"
-        private var text = ""
-        private var stateStart = SystemClock.uptimeMillis()
-
-        private var w = baseW; private var h = baseH
-        private var vw = 0f; private var vh = 0f
-        private var tw = baseW; private var th = baseH
-        private var rim = 0.28f; private var rimTarget = 0.28f
-        private var angle = 0f
-        private var last = 0L
-        private var running = false
-
-        private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
-        private val softBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF07090E.toInt() }
-        private val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-        private val innerRim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-        private val glyph = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; strokeWidth = 2.3f * d
-        }
-        private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE; textSize = 13.5f * d
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        }
-        private val shader = SweepGradient(0f, 0f,
-            intArrayOf(0xFF5EE7FF.toInt(), 0xFF7AA2FF.toInt(), 0xFFB28DFF.toInt(), 0xFFFF7AC6.toInt(), 0xFFFFB65E.toInt(), 0xFF5EE7FF.toInt()), null)
-        private val matrix = Matrix()
-        private val rect = RectF()
-        private val arc = RectF()
-        private val path = Path()
-        private val seg = Path()
-        private val measure = PathMeasure()
-        private val barColors = intArrayOf(0xFF5EE7FF.toInt(), 0xFF7FB2FF.toInt(), 0xFFA78BFA.toInt(), 0xFFFF7AC6.toInt(), 0xFFFFB65E.toInt())
-        private val frame = Choreographer.FrameCallback { tick(it) }
-
-        init { rimPaint.shader = shader; innerRim.shader = shader }
-
-        fun setState(newPhase: String, newText: String) {
-            if (newPhase != phase) stateStart = SystemClock.uptimeMillis()
-            phase = newPhase
-            if (newPhase != "idle") { glyphPhase = newPhase; text = newText }
-            if (newPhase == "idle") {
-                tw = baseW; th = baseH; rimTarget = 0.26f
-            } else {
-                tw = (pad * 2 + glyphZone + textPaint.measureText(text)).coerceIn(min(minOpenW, maxW), maxW)
-                th = baseH + rowH; rimTarget = 1f
-            }
-            contentDescription = if (newPhase == "idle") "CORTEX" else "CORTEX $text"
-            start()
-        }
-
-        private fun start() {
-            if (running) return
-            running = true; last = 0L
-            Choreographer.getInstance().postFrameCallback(frame)
-        }
-
-        fun stop() { running = false; Choreographer.getInstance().removeFrameCallback(frame) }
-
-        private fun tick(nanos: Long) {
-            if (!running) return
-            val dt = if (last == 0L) 0.016f else ((nanos - last) / 1_000_000_000f).coerceIn(0.001f, 0.032f)
-            last = nanos
-            vw += ((tw - w) * 380f - vw * 24f) * dt; w += vw * dt
-            vh += ((th - h) * 380f - vh * 24f) * dt; h += vh * dt
-            rim += (rimTarget - rim) * min(1f, dt * 6f)
-            angle = (angle + dt * (if (phase == "idle") 30f else 165f)) % 360f
-            val settled = abs(tw - w) < 0.5f && abs(th - h) < 0.5f && abs(vw) < 2f && abs(vh) < 2f
-            if (settled) { w = tw; h = th; vw = 0f; vh = 0f }
-            requestLayout(); invalidate()
-            if (phase != "idle" || !settled || abs(rim - rimTarget) > 0.01f) Choreographer.getInstance().postFrameCallback(frame)
-            else running = false
-        }
-
-        override fun onMeasure(widthSpec: Int, heightSpec: Int) {
-            setMeasuredDimension(max(1, w.roundToInt()), max(1, (max(h, baseH * 0.8f)).roundToInt()))
-        }
-
-        override fun onDraw(c: Canvas) {
-            val cw = width.toFloat(); val ch = height.toFloat()
-            val radius = min(ch / 2f, 28 * d)
-            val inset = 1.2f * d
-            rect.set(inset, inset, cw - inset, ch - inset)
-            c.drawRoundRect(rect, radius, radius, bg)
-            c.drawRoundRect(rect.insetCopy(1.4f * d), radius, radius, softBg)
-
-            matrix.setRotate(angle); matrix.postTranslate(cw / 2f, ch / 2f)
-            shader.setLocalMatrix(matrix)
-            val a = rim.coerceIn(0f, 1f)
-            rimPaint.strokeWidth = 10 * d; rimPaint.alpha = (48 * a).toInt(); c.drawRoundRect(rect, radius, radius, rimPaint)
-            rimPaint.strokeWidth = 5.4f * d; rimPaint.alpha = (98 * a).toInt(); c.drawRoundRect(rect, radius, radius, rimPaint)
-            rimPaint.strokeWidth = 2.2f * d; rimPaint.alpha = (255 * a).toInt(); c.drawRoundRect(rect, radius, radius, rimPaint)
-            innerRim.strokeWidth = 1.2f * d; innerRim.alpha = (140 * a).toInt();
-            c.drawRoundRect(RectF(rect.left + 4.8f * d, rect.top + 4.8f * d, rect.right - 4.8f * d, rect.bottom - 4.8f * d), radius, radius, innerRim)
-
-            val t = ((ch - baseH) / rowH).coerceIn(0f, 1f)
-            if (t < 0.05f) return
-            val cy = baseH + rowH / 2f - 2 * d + (1f - t) * 6 * d
-            drawGlyph(c, pad + 14 * d, cy, t)
-            val textX = pad + glyphZone
-            val avail = max(0f, cw - textX - pad)
-            val shown = TextUtils.ellipsize(text, textPaint, avail, TextUtils.TruncateAt.END)
-            textPaint.alpha = (255 * t * t).toInt()
-            val ty = cy - (textPaint.ascent() + textPaint.descent()) / 2f
-            c.drawText(shown, 0, shown.length, textX, ty, textPaint)
-        }
-
-        private fun RectF.insetCopy(value: Float): RectF = RectF(left + value, top + value, right - value, bottom - value)
-
-        private fun drawGlyph(c: Canvas, cx: Float, cy: Float, t: Float) {
-            val now = SystemClock.uptimeMillis()
-            val since = (now - stateStart) / 1000f
-            glyph.alpha = (255 * t).toInt()
-            when (glyphPhase) {
-                "listening" -> for (i in 0 until 5) {
-                    val amp = 0.34f + 0.66f * abs(sin(now / 170f + i * 1.15f))
-                    val bar = (5f + 15f * amp) * d * t
-                    val x = cx + (i - 2) * 5.6f * d
-                    glyph.color = barColors[i]
-                    c.drawLine(x, cy - bar / 2f, x, cy + bar / 2f, glyph)
-                }
-                "understood", "executing" -> {
-                    glyph.color = 0xFF7DD3FC.toInt()
-                    arc.set(cx - 9 * d, cy - 9 * d, cx + 9 * d, cy + 9 * d)
-                    c.drawArc(arc, (now / 3.6f) % 360f, 110f + 70f * sin(now / 260f), false, glyph)
-                }
-                "done" -> {
-                    glyph.color = 0xFF4ADE80.toInt()
-                    c.drawCircle(cx, cy, 10 * d, glyph)
-                    path.reset()
-                    path.moveTo(cx - 4.5f * d, cy + 0.5f * d); path.lineTo(cx - 1.5f * d, cy + 4f * d); path.lineTo(cx + 5f * d, cy - 3.5f * d)
-                    measure.setPath(path, false)
-                    seg.reset(); measure.getSegment(0f, measure.length * (since / 0.35f).coerceIn(0f, 1f), seg, true)
-                    c.drawPath(seg, glyph)
-                }
-                "error" -> {
-                    glyph.color = 0xFFF87171.toInt()
-                    val shake = sin(since * 42f) * 4f * d * max(0f, 1f - since / 0.5f)
-                    c.save(); c.translate(shake, 0f)
-                    c.drawCircle(cx, cy, 10 * d, glyph)
-                    c.drawLine(cx - 4 * d, cy - 4 * d, cx + 4 * d, cy + 4 * d, glyph)
-                    c.drawLine(cx + 4 * d, cy - 4 * d, cx - 4 * d, cy + 4 * d, glyph)
-                    c.restore()
-                }
-            }
-        }
-
-        override fun onDetachedFromWindow() { stop(); super.onDetachedFromWindow() }
     }
 }

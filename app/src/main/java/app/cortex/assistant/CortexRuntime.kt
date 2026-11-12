@@ -1,9 +1,29 @@
 package app.cortex.assistant
 
-/** Tiny process-wide state shared by the activity and the background services. */
-object CortexRuntime {
-    /** true while MainActivity is on screen (the in-app recognizer owns the microphone). */
-    @Volatile var foreground = false
-    /** Set by CortexWakeService so the activity can make it release the microphone at once. */
-    @Volatile var wakeHook: (() -> Unit)? = null
+internal object CortexRuntime {
+    var wakeHook: (() -> Unit)? = null
+    var wakeStatus: String? = null
+    var wakeStatusListener: ((String?) -> Unit)? = null
+
+    var recording = false
+        set(value) {
+            if (field == value) return
+            field = value
+            wakeHook?.invoke()
+        }
+
+    var speaking = false
+        set(value) {
+            if (field == value) return
+            field = value
+            wakeHook?.invoke()
+        }
+
+    val audioBusy get() = recording || speaking
+
+    fun reportWake(value: String?) {
+        if (wakeStatus == value) return
+        wakeStatus = value
+        wakeStatusListener?.invoke(value)
+    }
 }

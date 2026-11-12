@@ -39,6 +39,13 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
             return
         }
         activeId = id
+        CortexRuntime.recording = true
+        if (CortexRuntime.wakeHook != null) ui.postDelayed({ beginListening(id, language) }, 200)
+        else beginListening(id, language)
+    }
+
+    private fun beginListening(id: String, language: String) {
+        if (activeId != id) return
         try {
             val r = SpeechRecognizer.createSpeechRecognizer(activity)
             recognizer = r
@@ -49,11 +56,11 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() = voice(id, "finishing")
                 override fun onError(error: Int) {
-                    if (activeId == id) { activeId = null; voice(id, "error", "Распознавание речи не завершилось. Попробуйте снова.") }
+                    if (activeId == id) { stop(); voice(id, "error", "Распознавание речи не завершилось. Попробуйте снова.") }
                 }
                 override fun onResults(results: Bundle?) {
                     if (activeId == id) {
-                        activeId = null
+                        stop()
                         voice(id, "result", results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty())
                     }
                 }
@@ -68,7 +75,7 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
             r.startListening(intent)
         } catch (_: Exception) {
-            activeId = null
+            stop()
             voice(id, "error", "Android не разрешил запустить микрофон.")
         }
     }
@@ -80,6 +87,7 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
         recognizer?.cancel()
         recognizer?.destroy()
         recognizer = null
+        CortexRuntime.recording = false
     }
 
     fun speak(id: String, text: String, language: String, speed: Float) {
@@ -87,20 +95,32 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
         try {
             tts?.stop()
             utteranceId = id
+            CortexRuntime.speaking = true
             tts?.language = Locale.forLanguageTag(language)
             tts?.setSpeechRate(speed.coerceIn(0.6f, 1.5f))
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) { if (utteranceId == id) ui.post { speech(id, "started") } }
-                override fun onDone(utteranceId: String?) { if (utteranceId == id) ui.post { speech(id, "done") } }
-                @Deprecated("System TTS error callback") override fun onError(utteranceId: String?) { if (utteranceId == id) ui.post { speech(id, "error") } }
+                override fun onDone(utteranceId: String?) { if (utteranceId == id) ui.post { finishSpeech(id, "done") } }
+                @Deprecated("System TTS error callback") override fun onError(utteranceId: String?) { if (utteranceId == id) ui.post { finishSpeech(id, "error") } }
+                override fun onError(utteranceId: String?, errorCode: Int) { if (utteranceId == id) ui.post { finishSpeech(id, "error") } }
             })
             val result = tts?.speak(text.take(4500), TextToSpeech.QUEUE_FLUSH, Bundle(), id)
-            if (result != TextToSpeech.SUCCESS) speech(id, "error")
-        } catch (_: Exception) { speech(id, "error") }
+            if (result != TextToSpeech.SUCCESS) finishSpeech(id, "error")
+        } catch (_: Exception) { finishSpeech(id, "error") }
     }
     fun silence(id: String?) {
+        val current = utteranceId ?: return
+        if (id != null && id != current) return
         tts?.stop()
-        if (utteranceId != null && (id == null || utteranceId == id)) { speech(utteranceId!!, "stopped"); utteranceId = null }
+        finishSpeech(current, "stopped")
     }
-    fun close() { stop(); tts?.shutdown(); tts = null }
+
+    private fun finishSpeech(id: String, phase: String) {
+        if (utteranceId != id) return
+        utteranceId = null
+        CortexRuntime.speaking = false
+        speech(id, phase)
+    }
+
+    fun close() { stop(); silence(null); tts?.shutdown(); tts = null; ui.removeCallbacksAndMessages(null) }
 }

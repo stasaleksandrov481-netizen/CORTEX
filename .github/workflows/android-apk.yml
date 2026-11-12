@@ -1,4 +1,4 @@
-name: CORTEX 0.8.8 Android APK and Release
+name: CORTEX Android APK and Release
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: cortex-0-8-8-release
+  group: cortex-android-release
   cancel-in-progress: false
 
 jobs:
@@ -24,14 +24,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The v0.8.8 source ZIP contains a non-standard, unverified 4-KB
-      # gradle-wrapper.jar. Restore the working wrapper from a known commit.
-      # Keep wrapper validation enabled; do not execute the invalid JAR.
-      - name: Restore valid Gradle Wrapper from last successful release
-        shell: bash
-        run: |
-          git show 59f978d64247df240d96635c403e472f00c575a8:gradle/wrapper/gradle-wrapper.jar > gradle/wrapper/gradle-wrapper.jar
-          test "$(wc -c < gradle/wrapper/gradle-wrapper.jar)" -gt 40000
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
 
       - name: Install JDK 17
         uses: actions/setup-java@v4
@@ -55,28 +49,34 @@ jobs:
         run: gradle --no-daemon --stacktrace :app:assembleDebug
 
       - name: Prepare download
+        id: apk
+        shell: bash
         run: |
+          version=$(sed -nE 's/^[[:space:]]*versionName = "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' app/build.gradle.kts)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           mkdir -p release
           test -s app/build/outputs/apk/debug/app-debug.apk
-          cp app/build/outputs/apk/debug/app-debug.apk release/CORTEX-0.8.8-Island-debug.apk
-          sha256sum release/CORTEX-0.8.8-Island-debug.apk > release/SHA256SUMS.txt
+          name="CORTEX-$version-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "release/$name"
+          (cd release && sha256sum "$name" > SHA256SUMS.txt)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
 
       - name: Save APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CORTEX-0.8.8-Island-debug-APK
+          name: CORTEX-${{ steps.apk.outputs.version }}-debug-APK
           path: release/
           if-no-files-found: error
 
-      - name: Publish v0.8.8 release with APK
+      - name: Publish version with APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.8.8
+          tag_name: v${{ steps.apk.outputs.version }}
           target_commitish: ${{ github.sha }}
-          name: CORTEX 0.8.8 — Island
-          body_path: RELEASE_NOTES_0.8.8.md
+          name: CORTEX ${{ steps.apk.outputs.version }}
           files: |
-            release/CORTEX-0.8.8-Island-debug.apk
+            release/${{ steps.apk.outputs.name }}
             release/SHA256SUMS.txt
           fail_on_unmatched_files: true
           overwrite_files: true

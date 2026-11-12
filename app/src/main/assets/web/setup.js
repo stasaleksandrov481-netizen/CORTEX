@@ -55,7 +55,7 @@ window.CortexSetup = (() => {
       case 2: return `<div class="intro-stage modes-intro"><div class="intro-eyebrow">СПОСОБ ВЫЗОВА</div><h1>Всегда рядом.<br>На ваших условиях.</h1><p>Выберите, как CORTEX будет появляться поверх приложений. Позже это можно изменить.</p>
         <div class="intro-mode-list" role="group" aria-label="Видимость CORTEX">
           ${modeCard("always","Постоянный островок","Видим на экране, скрывается в горизонтальном режиме",mode)}
-          ${modeCard("wake","Только по обращению","Появляется после активации «Cortex»",mode)}
+          ${modeCard("wake","Только по обращению","Появляется после обращения «Кортекс»",mode)}
           ${modeCard("off","Без островка","Вызов через приложение или системный способ",mode)}
         </div><p class="intro-mini">Островок рисуется поверх приложений и требует разрешения «Поверх других приложений».</p>
         <div class="intro-feedback" role="status" aria-live="polite">${esc(notice)}</div></div>`;
@@ -117,6 +117,7 @@ window.CortexSetup = (() => {
   function setMode(mode) {
     if (!['always','wake','off'].includes(mode)) return;
     prefs().overlayMode = mode;
+    if (mode === "off") prefs().hotwordEnabled = false;
     Cortex.save();
     try { localStorage.setItem('cortex:surface-mode',mode); } catch {}
     if (!window.CortexIslandControl && mode !== "off") {
@@ -167,22 +168,5 @@ window.CortexSetup = (() => {
     return true;
   }
   function autoStart() { start(false); }
-  function wake(data) {
-    const raw = String(data?.text || '').trim();
-    const text = raw.replace(/^(?:эй[,.!\s-]*)?(?:кортекс|кортэкс|кортексу|cortex)[,.!\s-]*/iu, '').trim();
-    const tab = document.querySelector('[data-action="go"][data-value="chat"], [data-tab="chat"]');
-    tab?.click();
-    setTimeout(() => {
-      const input = document.getElementById('composer-input');
-      if (!input || document.hidden) return;
-      input.focus();
-      if (!text) {
-        input.dispatchEvent(new Event('input',{bubbles:true}));
-        return;
-      }
-      input.value = text; input.dispatchEvent(new Event('input',{bubbles:true}));
-      input.form?.requestSubmit();
-    },420);
-  }
-  return {start,autoStart,updatePermissions,wake,back};
+  return {start,autoStart,updatePermissions,back};
 })();

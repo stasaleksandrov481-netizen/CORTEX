@@ -1,6 +1,8 @@
 package app.cortex.assistant
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -8,12 +10,14 @@ import androidx.webkit.JavaScriptReplyProxy
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import java.util.concurrent.Future
+import java.util.UUID
+import java.util.concurrent.FutureTask
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -24,9 +28,12 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
     private val state = context.getSharedPreferences("cortex-backend", Context.MODE_PRIVATE)
     private val store = SecureSession(context)
     private val executor = Executors.newFixedThreadPool(3)
-    private val jobs = ConcurrentHashMap<String, Future<*>>()
+    private val jobs = ConcurrentHashMap<String, FutureTask<Unit>>()
+    private val main = Handler(Looper.getMainLooper())
     private val connections = ConcurrentHashMap<String, HttpURLConnection>()
-    private val installId = state.getString("install", null) ?: randomToken().also { state.edit().putString("install", it).apply() }
+    private val installId = synchronized(installLock) {
+        state.getString("install", null) ?: randomToken().also { state.edit().putString("install", it).apply() }
+    }
     private var pollCode: String? = null
     private val endpoint = "https://jjcqrjztxohnifmziksy.supabase.co/functions/v1/cortex/v1/"
 
@@ -36,25 +43,51 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
         val id = request.optString("id")
         if (!Regex("^request-[0-9]{10,16}-[0-9]{1,9}$").matches(id)) return
         if (request.optString("operation") == "cancel") {
-            jobs.remove(id)?.cancel(true)
-            connections.remove(id)?.disconnect()
+            cancel(id)
             return
         }
-        val task = executor.submit {
-            val outcome = JSONObject().put("id", id)
-            try { outcome.put("result", perform(request, id, reply)) }
-            catch (error: GatewayFailure) { outcome.put("error", error.code) }
-            catch (_: Exception) { outcome.put("error", "offline") }
-            if (!Thread.currentThread().isInterrupted) runCatching { reply.postMessage(outcome.toString()) }
-            jobs.remove(id)
+        fun publish(value: JSONObject) {
+            runCatching { reply.postMessage(value.put("id", id).toString()) }
         }
-        jobs[id] = task
+        enqueue(id, request, ::publish, ::publish)
     }
 
-    private fun perform(request: JSONObject, id: String, reply: JavaScriptReplyProxy): JSONObject {
+    fun chat(payload: JSONObject, onEvent: (JSONObject) -> Unit, done: (JSONObject) -> Unit): String {
+        val id = UUID.randomUUID().toString()
+        val request = JSONObject().put("operation", "chat").put("payload", payload)
+        enqueue(id, request, onEvent, done)
+        return id
+    }
+
+    private fun enqueue(id: String, request: JSONObject, onEvent: (JSONObject) -> Unit, done: (JSONObject) -> Unit) {
+        val task = FutureTask<Unit> {
+            val outcome = JSONObject()
+            try {
+                outcome.put("result", perform(request, id) { event ->
+                    main.post { if (jobs.containsKey(id)) onEvent(event) }
+                })
+            } catch (error: GatewayFailure) {
+                outcome.put("error", error.code)
+                if (error.retryAfter > 0) outcome.put("retry_after", error.retryAfter)
+            } catch (_: SocketTimeoutException) {
+                outcome.put("error", "timeout")
+            } catch (_: Exception) {
+                outcome.put("error", "offline")
+            }
+            main.post { if (jobs.remove(id) != null) done(outcome) }
+        }
+        if (jobs.putIfAbsent(id, task) == null) executor.execute(task)
+    }
+
+    fun cancel(id: String) {
+        jobs.remove(id)?.cancel(true)
+        connections.remove(id)?.let { socket -> Thread(socket::disconnect, "cortex-cancel").start() }
+    }
+
+    private fun perform(request: JSONObject, id: String, onEvent: (JSONObject) -> Unit): JSONObject {
         return when (request.optString("operation")) {
             "status" -> call("GET", "status", null, id)
-            "chat" -> call("POST", "chat", request.optJSONObject("payload") ?: throw GatewayFailure("invalid"), id, reply)
+            "chat" -> call("POST", "chat", request.optJSONObject("payload") ?: throw GatewayFailure("invalid"), id, onEvent)
             "support" -> call("POST", "support", request.optJSONObject("payload") ?: throw GatewayFailure("invalid"), id)
             "auth-start" -> call("POST", "auth/start", JSONObject(), id).also { pollCode = it.optString("poll") }
             "auth-poll" -> call("POST", "auth/poll", JSONObject().put("code", pollCode.orEmpty()), id).also {
@@ -75,15 +108,16 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
     }
 
     private fun call(method: String, route: String, payload: JSONObject?, id: String,
-                     reply: JavaScriptReplyProxy? = null): JSONObject {
+                     onEvent: ((JSONObject) -> Unit)? = null): JSONObject {
         val connection = (URL(endpoint + route).openConnection() as HttpURLConnection)
         connections[id] = connection
         try {
+            if (!jobs.containsKey(id)) throw InterruptedException()
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 12_000
             connection.readTimeout = 92_000
             connection.requestMethod = method
-            connection.setRequestProperty("Accept", if (reply == null) "application/json" else "text/event-stream")
+            connection.setRequestProperty("Accept", if (onEvent == null) "application/json" else "text/event-stream")
             connection.setRequestProperty("X-Cortex-Install", installId)
             connection.setRequestProperty("Cache-Control", "no-store")
             val token = store.get()
@@ -96,11 +130,12 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
             val status = connection.responseCode
             if (status !in 200..299) {
                 val body = connection.errorStream?.bufferedReader()?.use { it.readText().take(2000) }.orEmpty()
-                val code = runCatching { JSONObject(body).optString("error") }.getOrDefault("")
-                throw GatewayFailure(code.ifBlank { if (status == 429) "rate_limit" else "server" })
+                val error = runCatching { JSONObject(body) }.getOrNull()
+                val code = error?.optString("error").orEmpty().ifBlank { if (status == 429) "rate_limit" else "server" }
+                throw GatewayFailure(code, error?.optInt("retry_after") ?: 0)
             }
-            return if (reply != null && connection.contentType.orEmpty().contains("event-stream")) {
-                connection.inputStream.bufferedReader().use { sse(it, id, reply) }
+            return if (onEvent != null && connection.contentType.orEmpty().contains("event-stream")) {
+                connection.inputStream.bufferedReader().use { sse(it, onEvent) }
             } else {
                 val text = connection.inputStream.bufferedReader().use { it.readText() }
                 JSONObject(text)
@@ -111,7 +146,7 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
         }
     }
 
-    private fun sse(reader: BufferedReader, id: String, reply: JavaScriptReplyProxy): JSONObject {
+    private fun sse(reader: BufferedReader, onEvent: (JSONObject) -> Unit): JSONObject {
         val text = StringBuilder()
         val result = JSONObject()
         for (line in reader.lineSequence()) {
@@ -120,13 +155,14 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
             val value = line.substring(5).trim()
             if (value == "[DONE]") break
             val event = runCatching { JSONObject(value) }.getOrNull() ?: continue
-            if (event.has("error")) throw GatewayFailure(event.optString("error", "provider"))
+            if (event.has("error")) throw GatewayFailure(event.optString("error", "provider"), event.optInt("retry_after"))
+            if (event.optString("status") == "fallback") onEvent(JSONObject().put("status", "fallback"))
             if (event.has("delta")) {
                 val delta = event.optString("delta")
                 if (delta.isNotEmpty() && text.length < 20_000) {
                     val part = delta.take(20_000 - text.length)
                     text.append(part)
-                    runCatching { reply.postMessage(JSONObject().put("id", id).put("delta", part).toString()) }
+                    onEvent(JSONObject().put("delta", part))
                 }
             }
             for (key in arrayOf("tool", "tools", "tool_error")) if (event.has(key)) result.put(key, event.get(key))
@@ -136,11 +172,11 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
         return result
     }
     override fun close() {
-        jobs.values.forEach { it.cancel(true) }
-        connections.values.forEach { it.disconnect() }
+        jobs.keys.toList().forEach(::cancel)
         executor.shutdownNow()
     }
-    private class GatewayFailure(val code: String) : Exception(code)
+    private class GatewayFailure(val code: String, val retryAfter: Int = 0) : Exception(code)
+    private companion object { val installLock = Any() }
     private fun randomToken(): String {
         val bytes = ByteArray(32)
         SecureRandom().nextBytes(bytes)

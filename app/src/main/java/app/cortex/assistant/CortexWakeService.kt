@@ -1,154 +1,329 @@
 package app.cortex.assistant
 
 import android.Manifest
-import android.app.*
-import android.content.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.os.*
-import android.media.AudioManager
-import android.media.ToneGenerator
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
+import android.provider.Settings
 import android.speech.RecognitionListener
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 
-/**
- * Experimental local wake recognizer. Built-in SpeechRecognizer isn't guaranteed to support
- * persistent 24/7 wake-word listening; Android/OEM battery and foreground restrictions apply.
- * Explicit opt-in + mic notification are mandatory. No audio is uploaded by this class.
- * Model implementation may be operated by the OS; prefer on-device recognizer only.
- */
-class CortexWakeService : Service(), RecognitionListener {
+class CortexWakeService : Service() {
     private val ui = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
+    private var feed: WakeAudioFeed? = null
+    private var feedGeneration = 0
+    private var generation = 0
     private var enabled = false
-    private var restarting = false
-    private var recent = 0L
+    private var running = false
+    private var checkedLanguage = false
+    private var checkingLanguage = false
+    private var requestedDownload = false
+    private var streamed = false
+    private var streamAvailable = Build.VERSION.SDK_INT >= 33
+    private var streamRestarts = 0
     private var failures = 0
-    private var awaitingCommandUntil = 0L
     private val rearm = Runnable { listen() }
+    private val turn = CortexWakeTurn(
+        listening = { CortexIslandService.send(this, CortexIslandService.ACTION_WAKE) },
+        finished = { command ->
+            CortexIslandService.send(this, CortexIslandService.ACTION_SUBMIT) {
+                putExtra(CortexIslandService.EXTRA_MESSAGE, command)
+            }
+        },
+        closed = { CortexIslandService.send(this, CortexIslandService.ACTION_WAKE_CLOSED) }
+    )
+    private val expire = Runnable { turn.expire(SystemClock.elapsedRealtime()) }
+
     override fun onCreate() {
         super.onCreate()
-        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(NotificationChannel("cortex-listening", "CORTEX · голосовая активация", NotificationManager.IMPORTANCE_LOW))
-        val open = Intent(this, MainActivity::class.java)
-        val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        val notification = Notification.Builder(this, "cortex-listening")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("CORTEX слушает слово активации")
-            .setContentText("Микрофон включён. Отключите в настройках CORTEX.")
-            .setContentIntent(PendingIntent.getActivity(this, 99, open, flags))
-            .setOngoing(true).build()
+        val notifications = getSystemService(NotificationManager::class.java)
+        notifications.createNotificationChannel(NotificationChannel(CHANNEL, "CORTEX · голосовая активация", NotificationManager.IMPORTANCE_LOW))
+        val pending = PendingIntent.getActivity(this, 99, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val notification = Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle("CORTEX · голосовая активация")
+            .setContentText("Микрофон слушает слово «Кортекс» на устройстве")
+            .setContentIntent(pending).setOngoing(true).build()
         val started = runCatching {
             if (Build.VERSION.SDK_INT >= 34) startForeground(2811, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             else startForeground(2811, notification)
         }.isSuccess
-        if (!started) { stopSelf(); return }
-        // Checked only after startForeground(): a service started with startForegroundService() must call it first.
-        if (Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(this) ||
+        if (!started || Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(this) ||
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            stopSelf(); return
+            CortexRuntime.reportWake("Android не запустил офлайн-распознавание. Проверьте доступ к микрофону.")
+            stopSelf()
+            return
         }
-        recognizer = runCatching {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(this).apply { setRecognitionListener(this@CortexWakeService) }
-        }.getOrNull()
-        if (recognizer == null) { stopSelf(); return }
         enabled = true
-        CortexRuntime.wakeHook = {
-            runCatching { recognizer?.cancel() }
-            ui.removeCallbacks(rearm); ui.postDelayed(rearm, 1500)
-        }
+        CortexRuntime.wakeHook = ::updateAudio
+        CortexRuntime.reportWake("Подключаю микрофон…")
         listen()
     }
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_NOT_STICKY
+
+    private fun recognitionIntent() = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 4)
+        putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 690L)
+        if (Build.VERSION.SDK_INT >= 33) {
+            putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, arrayListOf("Кортекс", "Эй Кортекс", "Кортэкс"))
+        }
+    }
+
+    private fun updateAudio() {
+        if (CortexRuntime.audioBusy) {
+            ui.removeCallbacks(rearm)
+            ui.removeCallbacks(expire)
+            turn.reset()
+            closeFeed()
+            destroyRecognizer()
+            CortexRuntime.reportWake("Пауза на время диктовки или озвучивания.")
+        } else schedule(110)
+    }
+
     private fun listen() {
-        if (!enabled || restarting) return
-        if (CortexRuntime.foreground) { // the open app owns the microphone
-            ui.removeCallbacks(rearm); ui.postDelayed(rearm, 1500); return
+        if (!enabled || CortexRuntime.audioBusy || running || checkingLanguage || Build.VERSION.SDK_INT < 31) return
+        if (!Settings.canDrawOverlays(this) || checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            CortexRuntime.reportWake("Разрешите показ островка и доступ к микрофону.")
+            stopSelf()
+            return
         }
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+        val instance = recognizer ?: runCatching { SpeechRecognizer.createOnDeviceSpeechRecognizer(this) }
+            .onSuccess { recognizer = it }.getOrNull()
+        if (instance == null) {
+            recover(false)
+            return
         }
-        runCatching { recognizer?.startListening(intent) }.onFailure { postpone() }
+        val intent = recognitionIntent()
+        if (Build.VERSION.SDK_INT >= 33 && !checkedLanguage) {
+            checkLanguage(instance, intent)
+            return
+        }
+
+        val useStream = Build.VERSION.SDK_INT >= 33 && streamAvailable
+        if (useStream && !attachFeed(intent)) {
+            fallback()
+            return
+        }
+        val ticket = ++generation
+        instance.setRecognitionListener(listener(ticket, useStream))
+        running = true
+        runCatching { instance.startListening(intent) }.onFailure {
+            if (useStream) fallback() else recover(false)
+        }
     }
-    private fun postpone() {
-        if (!enabled) return
-        ui.removeCallbacks(rearm)
-        failures++
-        // Do not hammer the microphone on persistent API errors.
-        if (failures > 20) { stopSelf(); return }
-        ui.postDelayed(rearm, (1000L * failures).coerceAtMost(10_000L))
-    }
-    private fun accept(text: String) {
-        val trimmed = text.trim()
-        val now = SystemClock.elapsedRealtime()
-        val direct = Regex("""^(?:эй[\s,.-]*)?(?:кортекс|кортэкс|кортексу|кортекст|картекс|кортикс|cortex)(?:[\s,.:;!?-]+(.*))?$""", RegexOption.IGNORE_CASE).find(trimmed)
-        val anywhere = if (direct == null) Regex("""(?:^|\b)(?:кортекс|кортэкс|кортексу|кортекст|картекс|кортикс|cortex)(?:\b|[\s,.:;!?-]+)(.*)?$""", RegexOption.IGNORE_CASE).find(trimmed) else null
-        val match = direct ?: anywhere
-        val command: String
-        if (match != null) {
-            if (now - recent < 1400L) return
-            recent = now
-            command = match.groupValues.getOrElse(1) { "" }.trim()
-            runCatching {
-                val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 30)
-                tone.startTone(ToneGenerator.TONE_PROP_ACK, 65)
-                ui.postDelayed({ tone.release() }, 160)
+
+    private fun attachFeed(intent: Intent): Boolean {
+        return runCatching {
+            val previous = feed
+            val audio = previous ?: run {
+                val ticket = ++feedGeneration
+                WakeAudioFeed.start {
+                    ui.post { if (enabled && feed != null && ticket == feedGeneration) fallback() }
+                }.also { feed = it }
             }
-            failures = 0
-            if (command.isEmpty()) {
-                awaitingCommandUntil = now + 7000L
-                CortexIslandService.send(this, CortexIslandService.ACTION_STATUS) {
-                    putExtra(CortexIslandService.EXTRA_PHASE, "listening")
-                    putExtra(CortexIslandService.EXTRA_MESSAGE, "Слушаю команду…")
+            val read = audio.connect(replay = previous != null)
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, read)
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, WakeAudioFeed.ENCODING)
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, WakeAudioFeed.RATE)
+            intent.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
+        }.isSuccess
+    }
+
+    private fun checkLanguage(instance: SpeechRecognizer, intent: Intent) {
+        if (Build.VERSION.SDK_INT < 33) return
+        checkingLanguage = true
+        fun isRussian(tags: List<String>) = tags.any { it.equals("ru", true) || it.startsWith("ru-", true) || it.startsWith("ru_", true) }
+        val timeout = Runnable {
+            if (enabled && recognizer === instance && checkingLanguage) {
+                checkingLanguage = false
+                checkedLanguage = true
+                schedule(0)
+            }
+        }
+        ui.postDelayed(timeout, 3_200)
+        val callback = object : RecognitionSupportCallback {
+            override fun onSupportResult(support: RecognitionSupport) {
+                if (!enabled || recognizer !== instance || !checkingLanguage) return
+                ui.removeCallbacks(timeout)
+                checkingLanguage = false
+                if (!isRussian(support.installedOnDeviceLanguages) &&
+                    (isRussian(support.supportedOnDeviceLanguages) || isRussian(support.pendingOnDeviceLanguages))) {
+                    if (!requestedDownload && !isRussian(support.pendingOnDeviceLanguages)) {
+                        requestedDownload = true
+                        runCatching { instance.triggerModelDownload(intent) }
+                    }
+                    CortexRuntime.reportWake("Android загружает русский язык для офлайн-распознавания.")
+                    schedule(9_000)
+                } else {
+                    checkedLanguage = true
+                    schedule(0)
                 }
-                ui.removeCallbacks(rearm)
-                runCatching { recognizer?.cancel() }
-                ui.postDelayed(rearm, 240)
-                return
             }
-            awaitingCommandUntil = 0L
-        } else {
-            if (now > awaitingCommandUntil) return
-            awaitingCommandUntil = 0L
-            command = trimmed
+
+            override fun onError(error: Int) = timeout.run()
+        }
+        runCatching { instance.checkRecognitionSupport(intent, mainExecutor, callback) }
+            .onFailure { callback.onError(SpeechRecognizer.ERROR_CLIENT) }
+    }
+
+    private fun listener(ticket: Int, useStream: Boolean) = object : RecognitionListener {
+        private fun current() = enabled && running && ticket == generation && !CortexRuntime.audioBusy
+
+        override fun onReadyForSpeech(params: Bundle?) {
+            if (current()) CortexRuntime.reportWake("Слушаю слово «Кортекс».")
+        }
+
+        override fun onPartialResults(partialResults: Bundle?) {
+            if (current()) turn.partial(hypotheses(partialResults))
+        }
+
+        override fun onSegmentResults(segmentResults: Bundle) {
+            if (!current()) return
+            streamed = true
             failures = 0
+            streamRestarts = 0
+            result(hypotheses(segmentResults))
         }
-        CortexIslandService.send(this,CortexIslandService.ACTION_STATUS) {
-            putExtra(CortexIslandService.EXTRA_PHASE, "understood")
-            putExtra(CortexIslandService.EXTRA_MESSAGE, command.take(64))
+
+        override fun onEndOfSegmentedSession() {
+            if (current()) restartStream()
         }
-        val open = Intent(this, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            putExtra("cortex_wake_command", command)
+
+        override fun onResults(results: Bundle?) {
+            if (!current()) return
+            result(hypotheses(results))
+            failures = 0
+            if (useStream && !streamed) {
+                // Some device recognizers ignore the audio source and return a regular session.
+                fallback()
+            } else if (useStream) restartStream()
+            else {
+                running = false
+                schedule(70)
+            }
         }
-        runCatching { startActivity(open) }
+
+        override fun onError(error: Int) {
+            if (!current()) return
+            when (error) {
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                    result(emptyList())
+                    failures = 0
+                    if (useStream) restartStream() else {
+                        running = false
+                        schedule(95)
+                    }
+                }
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
+                    CortexRuntime.reportWake("Разрешите CORTEX доступ к микрофону.")
+                    stopSelf()
+                }
+                SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> {
+                    closeFeed()
+                    destroyRecognizer()
+                    CortexRuntime.reportWake("Установите русский язык для офлайн-распознавания Android.")
+                    checkedLanguage = false
+                    schedule(9_000)
+                }
+                else -> if (useStream && !streamed) fallback() else recover(useStream)
+            }
+        }
+
+        override fun onBeginningOfSpeech() = Unit
+        override fun onRmsChanged(rmsdB: Float) = Unit
+        override fun onBufferReceived(buffer: ByteArray?) = Unit
+        override fun onEndOfSpeech() = Unit
+        override fun onEvent(eventType: Int, params: Bundle?) = Unit
     }
-    override fun onResults(results: Bundle?) {
-        if (!CortexRuntime.foreground) results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let(::accept)
-        ui.postDelayed(rearm, 900)
+
+    private fun result(options: List<String>) {
+        val now = SystemClock.elapsedRealtime()
+        turn.result(options, now)
+        ui.removeCallbacks(expire)
+        val remaining = turn.timeLeft(now)
+        if (remaining > 0) ui.postDelayed(expire, remaining)
     }
-    override fun onPartialResults(partialResults: Bundle?) {
-        if (CortexRuntime.foreground) return
-        partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.takeIf { it.isNotBlank() }?.let(::accept)
+
+    private fun restartStream() {
+        if (!streamed && ++streamRestarts >= 2) {
+            fallback()
+            return
+        }
+        feed?.disconnect()
+        running = false
+        schedule(65)
     }
-    override fun onError(error: Int) { postpone() }
-    override fun onReadyForSpeech(params: Bundle?) = Unit
-    override fun onBeginningOfSpeech() = Unit
-    override fun onRmsChanged(rmsdB: Float) = Unit
-    override fun onBufferReceived(buffer: ByteArray?) = Unit
-    override fun onEndOfSpeech() = Unit
-    override fun onEvent(eventType: Int, params: Bundle?) = Unit
+
+    private fun fallback() {
+        streamAvailable = false
+        closeFeed()
+        destroyRecognizer()
+        schedule(105)
+    }
+
+    private fun recover(useStream: Boolean) {
+        failures = minOf(6, failures + 1)
+        if (useStream) feed?.disconnect()
+        destroyRecognizer()
+        if (failures >= 3) CortexRuntime.reportWake("Восстанавливаю офлайн-распознавание…")
+        schedule((270L * failures).coerceAtMost(1_620L))
+    }
+
+    private fun hypotheses(results: Bundle?): List<String> =
+        results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty().map(String::trim).filter(String::isNotEmpty)
+
+    private fun schedule(delay: Long) {
+        ui.removeCallbacks(rearm)
+        if (enabled && !CortexRuntime.audioBusy) ui.postDelayed(rearm, delay)
+    }
+
+    private fun closeFeed() {
+        ++feedGeneration
+        feed?.close()
+        feed = null
+    }
+
+    private fun destroyRecognizer() {
+        ++generation
+        running = false
+        checkingLanguage = false
+        recognizer?.let { instance -> runCatching { instance.cancel(); instance.destroy() } }
+        recognizer = null
+    }
+
     override fun onDestroy() {
         enabled = false
         CortexRuntime.wakeHook = null
         ui.removeCallbacksAndMessages(null)
-        recognizer?.cancel(); recognizer?.destroy(); recognizer=null
+        turn.reset()
+        closeFeed()
+        destroyRecognizer()
+        if (CortexRuntime.wakeStatus?.startsWith("Слушаю") == true) CortexRuntime.reportWake(null)
         super.onDestroy()
     }
+
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private companion object { const val CHANNEL = "cortex-listening" }
 }

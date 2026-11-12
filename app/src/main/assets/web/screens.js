@@ -3,7 +3,7 @@
 const CortexUI = (() => {
   const M = Cortex;
   const icon = CortexIcons;
-  const version = "0.8.6";
+  const version = "0.9.1";
   const tabs = [
     ["chat", "Чат", "message"], ["phone-tools", "Вызов", "bolt"], ["home", "Кортекс", ""],
     ["notes", "Заметки", "note"], ["profile", "Профиль", "user"]
@@ -224,10 +224,10 @@ const CortexUI = (() => {
       status = "Разрешите показ поверх приложений — тогда островок появится у камеры.";
       fix = tile("Показ поверх приложений", "Откроется системная настройка Android", "focus", "overlay-permission");
     } else if (native) {
-      status = p.overlayMode === "off" ? "Выберите режим ниже, чтобы включить островок." : "Островок готов. Нажмите на него, чтобы открыть CORTEX.";
+      status = p.overlayMode === "off" ? "Выберите режим ниже, чтобы включить островок." : "Нажмите на островок, чтобы написать Кортексу и получить ответ.";
     }
     const voiceRow = native
-      ? switchRow("Обращение «Кортекс»", perm.microphone ? "Слушает слово вне приложения. Нужно офлайн-распознавание речи Android." : "Сначала выдайте доступ к микрофону.", p.hotwordEnabled, "hotwordEnabled") +
+      ? switchRow("Обращение «Кортекс»", perm.microphone ? (p.hotwordEnabled && ctx?.wakeState || "Скажите «Кортекс», затем команду. Ответ появится в островке.") : "Сначала выдайте доступ к микрофону.", p.hotwordEnabled, "hotwordEnabled") +
         (perm.microphone ? "" : tile("Доступ к микрофону", "Нужен для обращения «Кортекс»", "mic", "microphone-permission"))
       : `<div class="feature-detail"><strong>Голосовое обращение</strong><small>Доступно в Android-приложении CORTEX.</small></div>`;
     const options = [
@@ -239,11 +239,21 @@ const CortexUI = (() => {
       <div class="scroll detail-scroll stack phone-tools-scroll">
         <div class="capability-note"><span class="capability-signal" aria-hidden="true"><i></i><i></i><i></i></span><span>${esc(status)}</span></div>
         ${fix}
-        <div class="island-demo" aria-hidden="true"><span class="island-demo-cam"></span>
-          <div class="demo-pill"><span class="demo-rim"></span><span class="demo-body">
-            <span class="demo-glyph"><span class="demo-slot demo-wave"><i></i><i></i><i></i><i></i><i></i></span><span class="demo-slot demo-spin"><i></i></span><span class="demo-slot demo-ok"><i></i></span></span>
-            <span class="demo-text"><b class="demo-slot">Слушаю…</b><b class="demo-slot">Выполняю…</b><b class="demo-slot">Готово</b></span>
-          </span></div></div>
+        <div class="island-demo" data-camera="${esc(ctx.islandCamera || "drop")}" aria-hidden="true">
+          <div class="demo-pill"><span class="demo-rim"></span>
+            <div class="demo-body">
+              <div class="demo-state"><span class="demo-wave"><i></i><i></i><i></i><i></i><i></i></span>
+                <span class="demo-text"><b>Слушаю…</b><b>Выполняю…</b><b>Готово</b></span>
+              </div>
+              <div class="demo-composer">
+                <div class="demo-brand">CORTEX <span class="demo-wave"><i></i><i></i><i></i><i></i><i></i></span>
+                  <span class="demo-actions"><i class="demo-open"></i><i class="demo-close"></i></span></div>
+                <div class="demo-entry">Напиши Кортексу… <span><i class="demo-send"></i></span></div>
+              </div>
+            </div>
+          </div>
+          <div class="island-demo-hood"><span class="island-demo-cam"></span></div>
+        </div>
         <section class="surface-choices" aria-label="Режим отображения">
         ${options.map(([value, title, hint]) => `<button type="button" class="surface-option" role="radio"
           aria-checked="${p.overlayMode === value}" ${attributes("surface-mode", value)}>
@@ -280,7 +290,7 @@ const CortexUI = (() => {
         auto: "Автоматический выбор подходящей бесплатной модели.",
         fast: "Приоритет скорости ответа, если модель доступна.",
         deep: "Приоритет качества для сложных задач."
-      })[model]} Если основной маршрут недоступен, сервер пробует резервный. Бесплатные модели могут достигать лимитов.</p>
+      })[model]} При перегрузке модели сервер пробует резерв. У бесплатных моделей общая дневная квота OpenRouter.</p>
       ${ctx.connection.profiles ? "" : '<p class="muted">Выбор применяется на сервере CORTEX с поддержкой профилей.</p>'}</section>`);
   }
   function language() {
