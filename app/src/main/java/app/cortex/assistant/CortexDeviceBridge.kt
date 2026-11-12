@@ -2,6 +2,7 @@ package app.cortex.assistant
 
 import android.Manifest
 import android.app.Activity
+import android.app.DownloadManager
 import android.app.NotificationManager
 import android.app.admin.DevicePolicyManager
 import android.content.*
@@ -219,7 +220,7 @@ internal class CortexDeviceBridge(
                     "security", "privacy" -> Settings.ACTION_SECURITY_SETTINGS
                     "about" -> Settings.ACTION_DEVICE_INFO_SETTINGS
                     "battery", "battery_saver" -> Settings.ACTION_BATTERY_SAVER_SETTINGS
-                    "dnd" -> Settings.ACTION_ZEN_MODE_SETTINGS
+                    "dnd" -> Settings.ACTION_SOUND_SETTINGS
                     "vpn" -> Settings.ACTION_VPN_SETTINGS
                     "keyboard" -> Settings.ACTION_INPUT_METHOD_SETTINGS
                     "accounts" -> Settings.ACTION_ADD_ACCOUNT
