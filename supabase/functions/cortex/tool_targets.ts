@@ -1,0 +1,5 @@
+export const settingsTargets = ["system", "wifi", "bluetooth", "mobile", "airplane", "location", "nfc", "hotspot", "battery_saver", "dnd", "display", "sound", "apps", "notifications", "storage", "battery", "accessibility", "internet", "data_usage", "apn", "network_operator", "vpn", "cast", "wifi_ip", "nfc_payment", "language", "region", "regional", "date", "keyboard", "physical_keyboard", "dictionary", "sync", "accounts", "about", "privacy", "security", "default_apps", "home_screen", "print", "night_light", "rotate", "screen_saver", "captioning", "battery_optimization", "notification_access", "dnd_access", "assistant"];
+export const networkTargets = ["wifi", "bluetooth", "mobile", "airplane", "location", "nfc", "hotspot", "battery_saver", "dnd"];
+export const stateTargets = ["phone", "battery", "storage", "network", "wifi", "mobile", "airplane", "location", "battery_saver", "ringer", "dnd", "nfc", "screen_lock", "time", "locale"];
+export const utilityTargets = ["camera_photo", "camera_video", "downloads", "keyboard"];
+export const panelTargets = ["wifi", "internet", "nfc", "sound"];

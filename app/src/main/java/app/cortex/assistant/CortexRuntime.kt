@@ -1,6 +1,15 @@
 package app.cortex.assistant
 
 internal object CortexRuntime {
+    var appVisible = false
+        private set
+    var islandVisibility: (() -> Unit)? = null
+
+    fun setAppVisible(value: Boolean) {
+        appVisible = value
+        islandVisibility?.invoke()
+    }
+
     var wakeHook: (() -> Unit)? = null
     var wakeStatus: String? = null
     var wakeStatusListener: ((String?) -> Unit)? = null

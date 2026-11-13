@@ -1,6 +1,53 @@
-.cortex-guard{position:fixed!important;z-index:2147483000;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:40px 28px;color:#fff;background:radial-gradient(ellipse at 50% 31%,#242424 0%,#070707 51%,#000 87%);isolation:isolate}
-.cortex-guard[hidden]{display:none!important}.cortex-guard-halo{width:min(46vw,185px);height:min(46vw,185px);border:1px solid #888;border-radius:50%;display:grid;place-items:center;margin-bottom:38px;box-shadow:0 0 44px #fff2,inset 0 0 25px #fff1;animation:cortex-halo 4.8s ease-in-out infinite}
-.cortex-guard-halo img{width:47%;filter:drop-shadow(0 0 13px #fff9)}.cortex-eyebrow{font-size:10px;letter-spacing:.21em;color:#aaa;margin:0 0 20px}.cortex-guard h1{font-size:clamp(28px,8vw,43px);letter-spacing:-.055em;font-weight:650;margin:0 0 16px}.cortex-guard-copy{font-size:14px;color:#bbb;line-height:1.65;max-width:330px;margin:0 0 32px}.cortex-guard-actions{display:grid;gap:11px;width:min(100%,330px)}.cortex-guard-actions button{min-height:52px;border:1px solid #666;border-radius:14px;color:#fff;background:#161616;font-size:14px}.cortex-guard-actions [data-gate-update]{background:white;color:black}.cortex-guard small{position:absolute;bottom:34px;letter-spacing:.1em;color:#7f7f7f;font-size:10px}
-.cortex-inbox{border:1px solid #555;border-radius:23px;background:#090909;color:#fff;width:min(520px,calc(100% - 25px));max-height:85dvh;overflow:auto;padding:20px;box-shadow:0 20px 80px #000}.cortex-inbox::backdrop{background:#000c}.cortex-inbox header{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #333;padding-bottom:12px}.cortex-inbox h2{font-size:18px;margin:0}.cortex-inbox header button{background:#252525;color:white;border:1px solid #555;border-radius:50%;width:38px;height:38px;font-size:24px}.cortex-inbox-main{max-height:65dvh;overflow-y:auto;padding-top:16px;line-height:1.55}.cortex-inbox article{margin-bottom:14px;border:1px solid #333;background:#121212;border-radius:14px;padding:14px;font-size:13px;overflow-wrap:anywhere}.cortex-inbox article small{color:#aaa;font-size:10px}.cortex-inbox article aside{margin-top:13px;border-left:2px solid white;background:#242424;padding:11px;border-radius:0 9px 9px 0}
-.message-list.entering .message.assistant.new-response{animation:cortex-in .7s cubic-bezier(.16,1,.3,1) both}.message-list.entering .message.assistant.new-response:before{content:"C O R T E X";display:block;color:#ddd;letter-spacing:.22em;font-size:9px;font-weight:700;margin:0 0 10px;animation:cortex-label .8s ease both}.message-list.entering .message.assistant.new-response .message-body{animation:cortex-text .7s cubic-bezier(.16,1,.3,1) .12s both}.message.assistant.pending .stream-text.live{animation:cortex-text .35s ease both}@keyframes cortex-in{from{opacity:0;transform:translateY(13px);filter:blur(4px)}to{opacity:1;transform:none;filter:none}}@keyframes cortex-label{from{opacity:0;letter-spacing:.48em}to{opacity:1;letter-spacing:.22em}}@keyframes cortex-text{from{opacity:.15;transform:translateY(5px)}to{opacity:1;transform:none}}@keyframes cortex-halo{50%{box-shadow:0 0 52px #fff5,inset 0 0 36px #fff2}}
-@media(prefers-reduced-motion:reduce){.cortex-guard-halo,.message-list.entering .message.assistant.new-response,.message-list.entering .message.assistant.new-response:before,.message-list.entering .message.assistant.new-response .message-body,.message.assistant.pending .stream-text.live{animation:none!important}}.reduce-motion .cortex-guard-halo,.reduce-motion .message-list.entering .message.assistant.new-response{animation:none!important}
+.cortex-guard {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  overflow: auto;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 16px;
+  padding: 28px;
+  text-align: center;
+  background: radial-gradient(ellipse at 50% 33%, #1b1b1b, #030303 68%);
+}
+.cortex-guard-halo {
+  display: grid;
+  place-items: center;
+  width: 80px;
+  height: 80px;
+  border: 1px solid #555;
+  border-radius: 28px;
+  background: linear-gradient(150deg, #2d2d2d, #0a0a0a);
+}
+.cortex-guard-halo img { width: 42px; }
+.cortex-guard h1 { font-size: clamp(1.8rem, 8vw, 2.6rem); letter-spacing: -.045em; }
+.cortex-guard-copy { max-width: 32ch; color: #ccc; line-height: 1.5; }
+.cortex-guard-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.cortex-guard button, .cortex-inbox button {
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 15px;
+  border: 1px solid #666;
+  background: #1b1b1b;
+  color: #fff;
+}
+.cortex-guard button:first-child { background: #eee; color: #111; }
+.cortex-inbox {
+  width: min(92vw, 34rem);
+  max-height: 80vh;
+  padding: 16px;
+  background: #121212;
+  color: #fff;
+  border: 1px solid #444;
+  border-radius: 24px;
+}
+.cortex-inbox::backdrop { background: #000c; }
+.cortex-inbox > header, .cortex-inbox article header { display: flex; gap: 12px; justify-content: space-between; align-items: center; }
+.cortex-inbox > header { margin-bottom: 12px; }
+.cortex-inbox-main { display: grid; gap: 10px; }
+.cortex-inbox article { border: 1px solid #373737; border-radius: 17px; padding: 12px; background: #191919; }
+.cortex-inbox article p { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cortex-inbox article small, .ticket-status { font-size: .75rem; color: #bfbfbf; }
+.ticket-status { padding: 3px 8px; border: 1px solid #555; border-radius: 100px; }
+.cortex-inbox aside { margin-top: 10px; padding-inline-start: 10px; border-inline-start: 1px solid #6b6b6b; }

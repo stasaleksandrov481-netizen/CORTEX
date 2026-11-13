@@ -34,7 +34,7 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
     private val installId = synchronized(installLock) {
         state.getString("install", null) ?: randomToken().also { state.edit().putString("install", it).apply() }
     }
-    private var pollCode: String? = null
+    @Volatile private var pollCode: String? = null
     private val endpoint = "https://jjcqrjztxohnifmziksy.supabase.co/functions/v1/cortex/v1/"
     private val cortexPackage = runCatching { context.packageManager.getPackageInfo(context.packageName,0) }.getOrNull()
 
@@ -58,6 +58,10 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
         val request = JSONObject().put("operation", "chat").put("payload", payload)
         enqueue(id, request, onEvent, done)
         return id
+    }
+
+    fun inbox(done: (JSONObject) -> Unit) {
+        enqueue(UUID.randomUUID().toString(), JSONObject().put("operation", "support-inbox"), {}, done)
     }
 
     private fun enqueue(id: String, request: JSONObject, onEvent: (JSONObject) -> Unit, done: (JSONObject) -> Unit) {
@@ -122,8 +126,8 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
             connection.requestMethod = method
             connection.setRequestProperty("Accept", if (onEvent == null) "application/json" else "text/event-stream")
             connection.setRequestProperty("X-Cortex-Install", installId)
-            connection.setRequestProperty("X-Cortex-Version-Code", cortexPackage?.versionCode?.toString() ?: "92")
-            connection.setRequestProperty("X-Cortex-Version-Name", cortexPackage?.versionName ?: "0.9.2")
+            connection.setRequestProperty("X-Cortex-Version-Code", cortexPackage?.versionCode?.toString() ?: BuildConfig.VERSION_CODE.toString())
+            connection.setRequestProperty("X-Cortex-Version-Name", cortexPackage?.versionName ?: BuildConfig.VERSION_NAME)
             connection.setRequestProperty("Cache-Control", "no-store")
             val token = store.get()
             if (!token.isNullOrEmpty()) connection.setRequestProperty("Authorization", "Bearer $token")

@@ -1,6 +1,8 @@
 package app.cortex.assistant
 
+import android.accessibilityservice.AccessibilityService
 import android.app.DownloadManager
+import android.app.KeyguardManager
 import android.app.admin.DevicePolicyManager
 import android.content.*
 import android.hardware.camera2.CameraCharacteristics
@@ -20,7 +22,7 @@ import java.util.Locale
 
 internal class CortexPhoneActions(private val context: Context) {
     private val audio by lazy { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
-    private val permissionStore by lazy { context.getSharedPreferences("cortex-device", Context.MODE_PRIVATE) }
+    private val main = Handler(Looper.getMainLooper())
     private fun launch(intent: Intent): Boolean = runCatching {
         context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         true
@@ -34,13 +36,18 @@ internal class CortexPhoneActions(private val context: Context) {
         fun started(intent: Intent) = status(if (launch(intent)) "opened" else "unavailable")
         when (kind) {
             "app" -> {
-                val known = mapOf("telegram" to "org.telegram.messenger", "tiktok" to "com.zhiliaoapp.musically",
-                    "instagram" to "com.instagram.android", "youtube" to "com.google.android.youtube",
-                    "whatsapp" to "com.whatsapp", "chrome" to "com.android.chrome")
-                val pkg = known[target.lowercase(Locale.ROOT)] ?: target
-                val intent = context.packageManager.getLaunchIntentForPackage(pkg)
-                    ?: return status("not_installed")
-                return started(intent).put("name", target).put("verified", false)
+                val app = resolveApp(target) ?: return status("not_installed")
+                val intent = context.packageManager.getLaunchIntentForPackage(app.pkg) ?: return status("not_installed")
+                return started(intent).put("name", app.name).put("package", app.pkg).put("verified", false)
+            }
+            "play_store" -> {
+                val query = command.optString("query").trim().take(100)
+                if (query.isBlank()) return status("invalid")
+                val encoded = Uri.encode(query)
+                val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://search?q=" + encoded)).setPackage("com.android.vending")
+                val opened = launch(market) || launch(Intent(Intent.ACTION_VIEW,
+                    Uri.parse("https://play.google.com/store/search?q=" + encoded + "&c=apps")))
+                return status(if (opened) "panel" else "unavailable")
             }
             "app_list" -> {
                 @Suppress("DEPRECATION")
@@ -124,20 +131,14 @@ internal class CortexPhoneActions(private val context: Context) {
                 val current = Settings.System.getInt(resolver, Settings.System.SCREEN_BRIGHTNESS, 128) * 100 / 255
                 val level = when (mode) { "set" -> command.optInt("level", current); "up" -> current + command.optInt("level", 10);
                     "down" -> current - command.optInt("level", 10); else -> current }.coerceIn(1, 100)
-                Settings.System.putInt(resolver, Settings.System.SCREEN_BRIGHTNESS_MODE,
-                    if (mode == "auto") Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC else Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
-                if (mode !in listOf("auto", "manual")) Settings.System.putInt(resolver, Settings.System.SCREEN_BRIGHTNESS, level * 255 / 100)
-                return status("done").put("level", level)
-            }
-            "torch" -> {
-                val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-                val camera = manager.cameraIdList.firstOrNull {
-                    manager.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-                } ?: return status("unsupported")
-                val previous = permissionStore.getBoolean("torch", false)
-                val enabled = when (mode) { "on" -> true; "off" -> false; "toggle" -> !previous; else -> previous }
-                if (mode != "status") { manager.setTorchMode(camera, enabled); permissionStore.edit().putBoolean("torch", enabled).apply() }
-                return status("done").put("enabled", enabled)
+                val wanted = if (mode == "auto") Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC else Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+                if (!Settings.System.putInt(resolver, Settings.System.SCREEN_BRIGHTNESS_MODE, wanted)) return status("unavailable")
+                if (mode !in listOf("auto", "manual") && !Settings.System.putInt(resolver, Settings.System.SCREEN_BRIGHTNESS, level * 255 / 100)) {
+                    return status("unavailable")
+                }
+                val actualMode = Settings.System.getInt(resolver, Settings.System.SCREEN_BRIGHTNESS_MODE, -1)
+                val actualLevel = Settings.System.getInt(resolver, Settings.System.SCREEN_BRIGHTNESS, 128)
+                return status(if (wanted == actualMode) "done" else "requested").put("level", (actualLevel * 100 + 127) / 255)
             }
             "ringer" -> {
                 audio.ringerMode = when (mode) { "vibrate" -> AudioManager.RINGER_MODE_VIBRATE;
@@ -145,12 +146,21 @@ internal class CortexPhoneActions(private val context: Context) {
                 return status("done")
             }
             "lock_screen" -> {
+                val service = CortexScreenService.connected
+                if (Build.VERSION.SDK_INT >= 28 && service?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN) == true) {
+                    return status("requested")
+                }
                 val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
                 if (!dpm.isAdminActive(ComponentName(context, CortexDeviceAdmin::class.java))) return status("needs_lock")
                 dpm.lockNow()
-                return status("done")
+                return status("requested")
             }
-            "home" -> return started(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
+            "home" -> {
+                if (CortexScreenService.connected?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME) == true) return status("opened")
+                return started(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
+            }
+            "recents" -> return status(if (CortexScreenService.connected?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS) == true)
+                "opened" else "unsupported")
             "timer" -> return started(Intent(AlarmClock.ACTION_SET_TIMER).putExtra(AlarmClock.EXTRA_LENGTH, command.optInt("seconds")))
             "alarm" -> return started(Intent(AlarmClock.ACTION_SET_ALARM)
                 .putExtra(AlarmClock.EXTRA_HOUR, command.optInt("hour")).putExtra(AlarmClock.EXTRA_MINUTES, command.optInt("minute")))
@@ -173,6 +183,134 @@ internal class CortexPhoneActions(private val context: Context) {
         return status("unsupported")
     }
 
+    data class App(val pkg: String, val name: String)
+
+    private fun launchableApps(): List<App> {
+        val manager = context.packageManager
+        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        @Suppress("DEPRECATION")
+        return manager.queryIntentActivities(launcher, 0)
+            .map { App(it.activityInfo.packageName, it.loadLabel(manager).toString()) }
+            .distinctBy(App::pkg)
+    }
+
+    private fun normalized(text: String) = text.lowercase(Locale.ROOT).replace('ё', 'е').trim()
+
+    fun resolveApp(target: String): App? {
+        val clean = normalized(target)
+        val apps = launchableApps()
+        val alias = ALIASES.entries.firstOrNull { clean == it.key || clean in it.value }
+        return apps.firstOrNull { it.pkg == (alias?.key ?: clean) }
+            ?: apps.filter { normalized(it.name) == clean }.singleOrNull()
+    }
+
+    fun mentionedApp(text: String): App? {
+        val clean = normalized(text)
+        val matches = launchableApps().filter { app ->
+            val terms = listOf(normalized(app.name), app.pkg) + ALIASES[app.pkg].orEmpty()
+            terms.any { name ->
+                name.length >= 3 && Regex("(?<![\\p{L}\\p{N}])" + Regex.escape(name) +
+                    "(?![\\p{L}\\p{N}])").containsMatchIn(clean)
+            }
+        }
+        return matches.singleOrNull()
+    }
+
+    fun capabilities(): JSONObject {
+        val info = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
+        val service = CortexScreenService.connected
+        val admin = context.getSystemService(DevicePolicyManager::class.java)
+        return JSONObject().put("version", info?.versionName ?: BuildConfig.VERSION_NAME)
+            .put("android", Build.VERSION.RELEASE).put("model", Build.MANUFACTURER + " " + Build.MODEL)
+            .put("screen", service != null).put("overlay", Settings.canDrawOverlays(context))
+            .put("lock", admin.isAdminActive(ComponentName(context, CortexDeviceAdmin::class.java)) ||
+                Build.VERSION.SDK_INT >= 28 && service != null)
+            .put("brightness", Settings.System.canWrite(context))
+            .put("microphone", context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+            .put("notifications", context.getSystemService(android.app.NotificationManager::class.java).areNotificationsEnabled())
+            .put("battery", safeRead("battery")).put("network", safeRead("network"))
+    }
+
+    private fun safeRead(target: String) = runCatching { readDevice(target) }.getOrNull() ?: JSONObject()
+
+    fun executeChecked(command: JSONObject, active: () -> Boolean = { true }, done: (JSONObject) -> Unit) {
+        val kind = command.optString("kind")
+        if (!active()) return
+        if (kind == "torch") {
+            torch(command.optString("mode"), active, done)
+            return
+        }
+        val result = runCatching { execute(command) }.getOrElse { JSONObject().put("status", "unavailable") }
+        val expected = result.optString("package")
+        if (kind == "app" && result.optString("status") == "opened" && CortexScreenService.connected != null) {
+            awaitState(active, { CortexScreenService.connected?.activePackage() == expected }) { confirmed ->
+                done(result.put("verified", confirmed))
+            }
+        } else if (kind == "lock_screen" && result.optString("status") == "requested") {
+            val keyguard = context.getSystemService(KeyguardManager::class.java)
+            awaitState(active, { keyguard.isKeyguardLocked || !context.getSystemService(PowerManager::class.java).isInteractive }) {
+                done(result.put("status", if (it) "done" else "requested"))
+            }
+        } else done(result)
+    }
+
+    private fun awaitState(active: () -> Boolean, condition: () -> Boolean, done: (Boolean) -> Unit) {
+        var remaining = 9
+        fun check() {
+            if (!active()) return
+            if (condition()) done(true)
+            else if (remaining-- == 0) done(false)
+            else main.postDelayed(::check, 220)
+        }
+        check()
+    }
+
+    private fun torch(mode: String, active: () -> Boolean, done: (JSONObject) -> Unit) {
+        val manager = context.getSystemService(CameraManager::class.java)
+        val id = runCatching {
+            manager.cameraIdList.firstOrNull {
+                manager.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            }
+        }.getOrNull()
+        if (id == null) {
+            done(JSONObject().put("status", "unsupported"))
+            return
+        }
+        if (mode !in listOf("on", "off", "toggle", "status")) {
+            done(JSONObject().put("status", "invalid"))
+            return
+        }
+        var target: Boolean? = null
+        var finished = false
+        lateinit var callback: CameraManager.TorchCallback
+        fun finish(status: String, enabled: Boolean? = null) {
+            if (finished) return
+            finished = true
+            runCatching { manager.unregisterTorchCallback(callback) }
+            if (active()) done(JSONObject().put("status", status).apply { if (enabled != null) put("enabled", enabled) })
+        }
+        callback = object : CameraManager.TorchCallback() {
+            override fun onTorchModeUnavailable(cameraId: String) {
+                if (cameraId == id) finish("unavailable")
+            }
+
+            override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
+                if (cameraId != id || finished) return
+                if (!active()) { finish("cancelled"); return }
+                val wanted = target
+                if (wanted != null) {
+                    if (wanted == enabled) finish("done", enabled)
+                    return
+                }
+                target = when (mode) { "on" -> true; "off" -> false; "toggle" -> !enabled; else -> enabled }
+                if (target == enabled) finish("done", enabled)
+                else runCatching { manager.setTorchMode(id, target == true) }.onFailure { finish("unavailable") }
+            }
+        }
+        runCatching { manager.registerTorchCallback(callback, main) }.onFailure { finish("unavailable") }
+        main.postDelayed({ finish("requested") }, 2700)
+    }
+
     private fun readDevice(target: String): JSONObject {
         fun done() = JSONObject().put("status", "done")
         return when (target) {
@@ -191,7 +329,8 @@ internal class CortexPhoneActions(private val context: Context) {
             "wifi" -> done().put("enabled", (context.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager).isWifiEnabled)
             "network" -> { val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                 val active = cm.activeNetwork; val cap = cm.getNetworkCapabilities(active)
-                val value = when { cap == null -> "offline"; cap.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                val value = when { cap == null -> "offline"; cap.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+                    cap.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
                     cap.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "mobile"; else -> "connected" }
                 done().put("value", value).put("validated", cap?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) }
             "airplane" -> done().put("enabled", Settings.Global.getInt(context.contentResolver, Settings.Global.AIRPLANE_MODE_ON, 0) != 0)
@@ -200,5 +339,19 @@ internal class CortexPhoneActions(private val context: Context) {
             "screen_lock" -> done().put("enabled", (context.getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager).isDeviceSecure)
             else -> JSONObject().put("status", "unsupported")
         }
+    }
+
+    private companion object {
+        val ALIASES = mapOf(
+            "org.telegram.messenger" to listOf("telegram", "телеграм", "телеграмм", "телеграме", "телега", "тг"),
+            "com.zhiliaoapp.musically" to listOf("tiktok", "тик ток", "тикток", "тиктоке", "тт"),
+            "com.instagram.android" to listOf("instagram", "инстаграм", "инстаграме"),
+            "com.google.android.youtube" to listOf("youtube", "ютуб", "ютубе"),
+            "com.whatsapp" to listOf("whatsapp", "ватсап", "ватсапе"),
+            "com.android.chrome" to listOf("chrome", "хром", "хроме"),
+            "com.yandex.browser" to listOf("яндекс браузер", "яндексе", "яндекс", "yandex browser"),
+            "ru.yandex.searchplugin" to listOf("яндекс с алисой"),
+            "com.android.vending" to listOf("google play", "play market", "плей маркет")
+        )
     }
 }

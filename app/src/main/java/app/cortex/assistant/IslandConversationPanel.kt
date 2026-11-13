@@ -41,11 +41,11 @@ internal class IslandConversationPanel(
     private val density = resources.displayMetrics.density
     private val status = label(10.5f, 0xFFC6C6C6.toInt())
     private val signal = Signal()
-    private val response = label(14f, 0xFFF0F0F0.toInt())
+    private val response = label(14.5f, 0xFFF0F0F0.toInt())
     private val answerScroll = object : ScrollView(context) {
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val maximum = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.UNSPECIFIED) dp(108)
-            else minOf(dp(108), MeasureSpec.getSize(heightMeasureSpec))
+            val maximum = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.UNSPECIFIED) dp(147)
+            else minOf(dp(147), MeasureSpec.getSize(heightMeasureSpec))
             super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(maximum, MeasureSpec.AT_MOST))
         }
     }
@@ -59,7 +59,7 @@ internal class IslandConversationPanel(
 
     init {
         orientation = VERTICAL
-        setPadding(dp(13), dp(5), dp(11), dp(10))
+        setPadding(dp(17), dp(9), dp(15), dp(14))
         isClickable = true
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         descendantFocusability = FOCUS_AFTER_DESCENDANTS
@@ -72,14 +72,15 @@ internal class IslandConversationPanel(
         val wordmark = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
         wordmark.addView(label(12f, Color.WHITE).apply {
             text = "CORTEX"
-            letterSpacing = .155f
+            letterSpacing = .18f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         }, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
         wordmark.addView(signal, LayoutParams(dp(30), dp(14)).apply { marginStart = dp(8) })
         identity.addView(wordmark, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         status.maxLines = 1
         status.ellipsize = TextUtils.TruncateAt.END
-        status.visibility = GONE
+        status.text = "На связи"
+        status.visibility = VISIBLE
         status.accessibilityLiveRegion = ACCESSIBILITY_LIVE_REGION_POLITE
         identity.addView(status, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = dp(3) })
         header.addView(identity, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply { marginStart = dp(4) })
@@ -87,24 +88,29 @@ internal class IslandConversationPanel(
             LayoutParams(dp(39), dp(43)))
         header.addView(Glyph("close", "Свернуть островок").apply { setOnClickListener { close() } },
             LayoutParams(dp(39), dp(43)))
-        addView(header, LayoutParams(LayoutParams.MATCH_PARENT, dp(43)))
+        addView(header, LayoutParams(LayoutParams.MATCH_PARENT, dp(47)))
 
         answerScroll.apply {
             isFillViewport = false
             isVerticalScrollBarEnabled = true
             overScrollMode = OVER_SCROLL_NEVER
             visibility = GONE
+            background = GradientDrawable().apply {
+                setColor(0xFF111111.toInt())
+                cornerRadius = dp(18).toFloat()
+                setStroke(dp(1), 0xFF2A2A2A.toInt())
+            }
             addView(response, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         }
         response.apply {
-            setPadding(dp(7), dp(3), dp(8), dp(6))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
             setLineSpacing(dp(2).toFloat(), 1f)
             setTextIsSelectable(true)
         }
-        addView(answerScroll, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) })
+        addView(answerScroll, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) })
 
         editor.apply {
-            hint = "Напиши Кортексу…"
+            hint = "Сообщение или команда"
             contentDescription = "Сообщение Кортексу"
             setHintTextColor(0xFFAAAAAA.toInt())
             setTextColor(Color.WHITE)
@@ -154,9 +160,9 @@ internal class IslandConversationPanel(
     fun status(phase: String, label: String) {
         signal.phase = phase
         signal.invalidate()
-        if (status.text.toString() == label) return
-        status.text = label
-        status.visibility = if (label.isBlank()) GONE else VISIBLE
+        val message = label.ifBlank { "На связи" }
+        if (status.text.toString() == message) return
+        status.text = message
     }
 
     fun animateSignal(animate: Boolean) {
@@ -168,7 +174,7 @@ internal class IslandConversationPanel(
         if (busy == active) return
         busy = active
         sendButton.kind = if (active) "stop" else "send"
-        sendButton.contentDescription = if (active) "Остановить ответ" else "Отправить"
+        sendButton.contentDescription = if (active) "Остановить задачу" else "Отправить"
         sendButton.invalidate()
         refreshSend()
     }
@@ -184,8 +190,10 @@ internal class IslandConversationPanel(
             answerScroll.scrollTo(0, 0)
             if (motion) {
                 response.alpha = 0f
-                response.translationY = dp(4).toFloat()
-                response.animate().alpha(1f).translationY(0f).setDuration(230).start()
+                response.translationY = dp(8).toFloat()
+                response.scaleX = .986f
+                response.animate().alpha(1f).translationY(0f).scaleX(1f).setDuration(330)
+                    .setInterpolator(android.view.animation.PathInterpolator(.18f, 1f, .32f, 1f)).start()
             }
         }
         return true

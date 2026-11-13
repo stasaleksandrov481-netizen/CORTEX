@@ -63,9 +63,12 @@ internal class LiquidIslandView(
         intArrayOf(0xFF222222.toInt(), 0xFF0B0B0B.toInt(), 0xFF030303.toInt(), Color.BLACK),
         floatArrayOf(0f, .16f, .48f, 1f), Shader.TileMode.CLAMP)
     private val rim = SweepGradient(0f, 0f, intArrayOf(
-        0xFFE6AB4E.toInt(), 0xFFFFDA91.toInt(), 0xFFBA77D8.toInt(), 0xFF814AD7.toInt(),
-        0xFF9B65ED.toInt(), 0xFFFFCB74.toInt(), 0xFFE6AB4E.toInt()
-    ), floatArrayOf(0f, .13f, .31f, .50f, .69f, .90f, 1f))
+        0xFF75F2F4.toInt(), 0xFF9FA9FF.toInt(), 0xFFD6A2FF.toInt(), 0xFFFF8AB2.toInt(),
+        0xFFFFD894.toInt(), 0xFFA6F7D9.toInt(), 0xFF75F2F4.toInt()
+    ), floatArrayOf(0f, .16f, .34f, .53f, .68f, .84f, 1f))
+    private val reflection = LinearGradient(0f, 0f, 0f, 1f,
+        intArrayOf(0x82FFFFFF.toInt(), 0x15FFFFFF, 0x00FFFFFF, 0x30FFFFFF),
+        floatArrayOf(0f, .22f, .70f, 1f), Shader.TileMode.CLAMP)
     private val labelPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 11.5f, resources.displayMetrics)
@@ -151,7 +154,7 @@ internal class LiquidIslandView(
             return
         }
         animation = ValueAnimator.ofFloat(progress, target).apply {
-            duration = ((if (open) 550 else 430) * abs(target - progress)).toLong().coerceAtLeast(110)
+            duration = ((if (open) 620 else 490) * abs(target - progress)).toLong().coerceAtLeast(110)
             interpolator = LinearInterpolator()
             addUpdateListener { progress = it.animatedValue as Float; showContent() }
             addListener(object : AnimatorListenerAdapter() {
@@ -177,11 +180,12 @@ internal class LiquidIslandView(
     }
 
     private fun showContent() {
-        val alpha = smooth(.42f, .86f, progress)
+        val alpha = smooth(.38f, .87f, progress)
         conversation.visibility = if (alpha > .025f) VISIBLE else INVISIBLE
         conversation.alpha = alpha
         conversation.translationY = (1f - alpha) * 8 * density
-        conversation.scaleX = .963f + .037f * alpha
+        conversation.scaleX = .949f + .051f * alpha
+        conversation.scaleY = .965f + .035f * alpha
         invalidate()
     }
 
@@ -260,12 +264,12 @@ internal class LiquidIslandView(
         val idle = if (animate) sin(seconds * 2f) * .40f else 0f
         val wide = smooth(.08f, .77f, p)
         val down = smooth(.23f, .93f, p)
-        val flex = (5.3f * spill + 7f * rebound - 3.4f * pinch - 2.6f * press + impulse * 6.5f + idle) * density
+        val flex = (8.4f * spill + 9f * rebound - 5.3f * pinch - 3.8f * press + impulse * 8.0f + idle) * density
         body.set(
             mix(compact.left, expanded.left, wide) - flex,
             mix(compact.top, expanded.top, down) + (pinch * 3.6f + press * 1.4f - impulse * 1.8f) * density,
             mix(compact.right, expanded.right, wide) + flex,
-            mix(compact.bottom, expanded.bottom, down) + (spill * 9f + rebound * 18f - pinch * 3.2f + impulse * 5.5f + idle) * density
+            mix(compact.bottom, expanded.bottom, down) + (spill * 12f + rebound * 21f - pinch * 3.2f + impulse * 5.5f + idle) * density
         )
         val lift = (pinch * 2.6f + spill * 4.8f + impulse * 4.6f + idle) * density
         drawContour(lift, p, spill)
@@ -300,12 +304,22 @@ internal class LiquidIslandView(
             canvas.drawPath(cutout, edge)
             canvas.restore()
         }
+        matrix.setScale(1f, body.height().coerceAtLeast(1f))
+        matrix.postTranslate(0f, body.top)
+        reflection.setLocalMatrix(matrix)
+        edge.shader = reflection
+        edge.strokeWidth = .62f * density
+        edge.alpha = 225
+        canvas.drawPath(surface, edge)
         edge.shader = null
 
         val alpha = 1f - smooth(.06f, .42f, p)
         if (alpha > 0f) drawSignal(canvas, seconds, alpha, animate)
         canvas.restore()
-        if (animate && animation?.isRunning != true) postInvalidateDelayed(32)
+        if (animate && animation?.isRunning != true) {
+            val active = phase == "listening" || phase == "executing" || tick < .6f || isPressed || layoutAt > now - GEOMETRY_MS
+            postInvalidateDelayed(if (active) 24 else 64)
+        }
     }
 
     override fun dispatchDraw(canvas: Canvas) {
@@ -326,8 +340,8 @@ internal class LiquidIslandView(
         val b = body.bottom
         val w = body.width().coerceAtLeast(1f)
         val h = body.height().coerceAtLeast(1f)
-        val topRadius = minOf(w * .44f, h * .49f, (19f + 14f * open) * density)
-        val bottomRadius = minOf(w * .46f, h * .52f, (19f + 17f * open + spill * 6f) * density)
+        val topRadius = minOf(w * .44f, h * .49f, (19f + 20f * open) * density)
+        val bottomRadius = minOf(w * .46f, h * .52f, (19f + 22f * open + spill * 6f) * density)
         surface.rewind()
         surface.moveTo(l + topRadius, t)
         surface.cubicTo(l + w * .37f, t - lift * .7f, r - w * .39f, t + lift * .2f, r - topRadius, t)

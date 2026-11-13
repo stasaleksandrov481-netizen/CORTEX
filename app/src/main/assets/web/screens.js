@@ -3,7 +3,7 @@
 const CortexUI = (() => {
   const M = Cortex;
   const icon = CortexIcons;
-  const version = "0.9.2";
+  const version = "1.0.0";
   const tabs = [
     ["chat", "Чат", "message"], ["phone-tools", "Вызов", "bolt"], ["home", "Кортекс", ""],
     ["notes", "Заметки", "note"], ["profile", "Профиль", "user"]
@@ -79,7 +79,7 @@ const CortexUI = (() => {
         <button class="composer-button mic-button" type="button" aria-label="Диктовать сообщение" ${attributes("dictate")}>${icon("mic", 21)}</button>
         <button class="composer-button voice-button" type="button" aria-label="Голосовой разговор" ${attributes("voice-chat")}>${icon("wave", 22)}</button>
         <button class="composer-button send-button" type="submit" aria-label="Отправить сообщение" hidden disabled>${icon("sendUp", 23)}</button>
-        <button class="composer-button stop-button" type="button" aria-label="Остановить генерацию" ${attributes("stop")} hidden>${icon("stop", 19)}</button>
+        <button class="composer-button stop-button" type="button" aria-label="Остановить задачу" ${attributes("stop")} hidden>${icon("stop", 19)}</button>
       </div>
     </form>`;
   }
@@ -91,7 +91,7 @@ const CortexUI = (() => {
         <div class="hero-core" data-home-core aria-hidden="true"><i class="core-halo"></i>
           <i class="core-orbit"></i><i class="core-orbit"></i><i class="core-orbit"></i>
           <i class="core-glass"></i>${sign}</div>
-        <div class="hero-copy"><h1 id="home-title">Чем помочь?</h1><p class="hero-subtitle">Опишите задачу своими словами. Остальное — за CORTEX.</p></div>
+        <div class="hero-copy"><h1 id="home-title">Чем помочь?</h1><p class="hero-subtitle">Опишите задачу или задайте вопрос.</p></div>
       </section>`;
   }
 
@@ -300,7 +300,7 @@ const CortexUI = (() => {
   }
   function notifications(ctx) {
     return detail("Уведомления", "Ответы в фоновом режиме", `<section class="panel stack">
-      ${switchRow("Ответ готов", "Показывать уведомление Android, если приложение свёрнуто", M.state.preferences.notifyReplies, "notifyReplies")}
+      ${switchRow("Ответы поддержки", "Уведомлять о новых сообщениях в обращениях", M.state.preferences.notifyReplies, "notifyReplies")}
       <p class="muted">${ctx.native && ctx.permissions.notifications ? "Android разрешает уведомления." : "Для оповещений нужен доступ в настройках Android."}</p>
     </section>`);
   }
@@ -363,20 +363,22 @@ const CortexUI = (() => {
     return detail("Доступы Android", "Давайте только те разрешения, которые нужны вам", `<section class="access-list">
       ${item("mic", "Микрофон", "Речь и активация по имени. Фоновое прослушивание отдельно включается в настройках.", a.microphone, "microphone-permission")}
       ${item("focus", "Поверх приложений", "Показывать островок поверх других окон. Не даёт доступа к содержимому экрана.", a.overlay, "overlay-permission")}
-      ${item("bell", "Уведомления", "Уведомление о работающем голосовом режиме и готовности ответа.", a.notifications, "notification-permission")}
-      ${item("check", "Использование приложений", "Проверять, какое приложение сейчас открыто, чтобы подтвердить результат.", a.verifyApps, "verification-permission")}
+      ${item("bell", "Уведомления", "Статус задач, кнопка остановки и новые ответы поддержки.", a.notifications, "notification-permission")}
+      ${item("check", "Управление экраном", "CORTEX читает элементы выбранного приложения по вашему запросу. Передача подписей модели требует отдельного согласия.", a.screenAutomation, "verification-permission")}
       ${a.assistantSupported ? item("focus", "Цифровой помощник", "Разрешает системный вызов помощника и передачу текста экрана после вашего действия.", a.assistant, "assistant-permission") : ""}
       ${item("shield", "Блокировка экрана", "Нужна только для команды погасить или заблокировать экран.", a.screenLock, "lock-permission")}
       ${item("sliders", "Яркость", "Для изменения яркости экрана по запросу.", a.brightness, "brightness-permission")}
       </section>
       <p class="quiet-copy">Некоторые разрешения Android показывает в отдельных системных меню. Нажатие «Настроить» не означает, что доступ уже выдан.</p>
-      ${button("Повторить начальную настройку", "refresh", "open-setup", "", "outline")}`);
+      <div class="actions">${button("Журнал действий", "history", "action-history", "", "outline")}
+      ${button("Повторить начальную настройку", "refresh", "open-setup", "", "outline")}</div>`);
   }
   function support() {
     return detail("Помощь и поддержка", "Связь с разработчиком", group(
       tile("Написать разработчику", "Вопрос о работе CORTEX", "message", "support-form", "contact") +
       tile("Сообщить об ошибке", "Опишите, что произошло, и приложите скриншот", "alert", "support-form", "bug") +
-      tile("Предложить функцию", "Расскажите, чего не хватает", "spark", "support-form", "idea")
+      tile("Предложить функцию", "Расскажите, чего не хватает", "spark", "support-form", "idea") +
+      tile("Отправить жалобу", "Опишите ситуацию для поддержки", "shield", "support-form", "complaint")
     ) +
     label("ЧАСТЫЕ ВОПРОСЫ") +
     `<section class="panel faq">

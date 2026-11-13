@@ -49,6 +49,13 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     private var opening = false
     private var moving = false
     private var busy = false
+    private var actionBusy = false
+    private var invokedFrom: String? = null
+    private val actionStatus: (String, String) -> Unit = { state, text ->
+        actionBusy = state == "executing"
+        if (!busy) updateStatus(state, text)
+    }
+    private val visibilityChanged: () -> Unit = { render() }
 
     private val settleLayout = Runnable { island?.let { placeIsland(it) } }
     private val returnToIdle = Runnable { updateStatus("idle", "") }
@@ -60,6 +67,8 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
 
     override fun onCreate() {
         super.onCreate()
+        CortexActionState.listener = actionStatus
+        CortexRuntime.islandVisibility = visibilityChanged
         displays = getSystemService(DisplayManager::class.java)
         val primary = displays.getDisplay(Display.DEFAULT_DISPLAY)
         overlayContext = if (Build.VERSION.SDK_INT >= 30 && primary != null) {
@@ -141,7 +150,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     }
 
     private fun render() {
-        if (!canShow() || (mode == "wake" && phase == "idle" && !opening && !moving)) {
+        if (CortexRuntime.appVisible || !canShow() || (mode == "wake" && phase == "idle" && !opening && !moving)) {
             removeIsland()
             return
         }
@@ -163,7 +172,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         visible.haptics = preferences.getBoolean("haptics", true)
         visible.reduceMotion(preferences.getBoolean("reduceMotion", false))
         visible.conversation.status(phase, label)
-        visible.conversation.busy(busy)
+        visible.conversation.busy(busy || actionBusy)
         val answerResized = visible.conversation.answer(reply)
         if (geometryChanged || wasStatus != (label.isNotEmpty()) || answerResized) {
             placeIsland(visible, deform = !geometryChanged && !moving)
@@ -174,7 +183,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         val panel = IslandConversationPanel(overlayContext, { submit(it) }, ::stopAnswer,
             { setExpanded(false) }, ::openApplication)
         panel.draft(draft)
-        val view = LiquidIslandView(overlayContext, panel, { setExpanded(true, focus = true) },
+        val view = LiquidIslandView(overlayContext, panel, { setExpanded(true) },
             { setExpanded(false) }, ::openApplication)
         screen = currentScreen
         val params = layoutParams()
@@ -191,6 +200,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
             return
         }
         ui.removeCallbacks(settleLayout)
+        if (open) CortexScreenService.connected?.activePackage()?.takeIf { CortexScreenService.supportsPackage(it) }?.let { invokedFrom = it }
         opening = open
         moving = true
         if (!open) view.conversation.hideKeyboard()
@@ -208,7 +218,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         val lp = window ?: return
         val d = view.resources.displayMetrics.density
         val safe = viewport.safeArea(d)
-        val panelWidth = minOf(safe.width(), 294 * d).roundToInt().coerceAtLeast(1)
+        val panelWidth = minOf(safe.width(), 326 * d).roundToInt().coerceAtLeast(1)
         view.conversation.measure(View.MeasureSpec.makeMeasureSpec(panelWidth, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(safe.height().roundToInt().coerceAtLeast(1), View.MeasureSpec.AT_MOST))
         val placement = IslandPlacement(viewport, d, view.tag == true, panelWidth, view.conversation.measuredHeight)
@@ -235,14 +245,16 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
 
     private fun submit(raw: String, fromVoice: Boolean = false) {
         val text = raw.trim().take(600)
-        if (busy || text.isEmpty()) return
+        if (busy || actionBusy || text.isEmpty()) return
+        if (fromVoice) invokedFrom = CortexScreenService.connected?.activePackage()
         if (fromVoice) island?.conversation?.hideKeyboard()
         busy = true
         reply = ""
         updateStatus("executing", "Думаю…")
         setExpanded(true)
         val streamed = StringBuilder()
-        assistant.send(text, preferences.getString("profile", "auto") ?: "auto",
+        assistant.send(text, preferences.getString("profile", "auto") ?: "auto", invokedFrom,
+            beforeScreen = { setExpanded(false) },
             toolsAllowed = { preferences.getBoolean("phoneActions", true) && Settings.canDrawOverlays(this) },
             progress = { updateStatus("executing", it) },
             delta = { chunk ->
@@ -264,7 +276,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     }
 
     private fun stopAnswer() {
-        if (!busy) return
+        if (!busy) { if (actionBusy) CortexActionState.stop(); return }
         assistant.cancel()
         busy = false
         if (reply.isBlank()) reply = "Ответ остановлен."
@@ -397,6 +409,8 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     override fun onDisplayRemoved(displayId: Int) = Unit
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() {
+        if (CortexActionState.listener === actionStatus) CortexActionState.listener = null
+        if (CortexRuntime.islandVisibility === visibilityChanged) CortexRuntime.islandVisibility = null
         displays.unregisterDisplayListener(this)
         ui.removeCallbacksAndMessages(null)
         removeIsland()

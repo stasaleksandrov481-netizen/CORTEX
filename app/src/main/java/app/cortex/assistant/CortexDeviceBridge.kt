@@ -21,9 +21,11 @@ internal class CortexDeviceBridge(
     private val activity: Activity,
     private val speech: CortexSpeech,
     private val emit: (JSONObject) -> Unit
-) {
+) : AutoCloseable {
     private val context get() = activity.applicationContext
     private val phone by lazy { CortexPhoneActions(activity) }
+    private val engineDelegate = lazy { CortexActionEngine(activity) }
+    private val engine by engineDelegate
     private var pendingImage = false
     private var pendingExport: String? = null
 
@@ -46,9 +48,28 @@ internal class CortexDeviceBridge(
             "phone-action" -> {
                 val id = body.optString("id")
                 val command = body.optJSONObject("command")
-                val result = if (command == null) JSONObject().put("status", "invalid") else runCatching { phone.execute(command) }
-                    .getOrElse { JSONObject().put("status", "unavailable") }
-                emit(JSONObject().put("type", "phone").put("id", id).put("result", result))
+                fun reply(result: JSONObject) = emit(JSONObject().put("type", "phone").put("id", id).put("result", result))
+                if (command == null) reply(JSONObject().put("status", "invalid"))
+                else if (CortexActionState.gate != "open") reply(JSONObject().put("status", "disabled"))
+                else phone.executeChecked(command) { result ->
+                    CortexActionState.log(context, "Команда Android: " + command.optString("kind") + " · " + result.optString("status"))
+                    reply(result)
+                }
+            }
+            "action-start" -> {
+                val id = body.optString("id")
+                fun event(phase: String, text: String = "", ok: Boolean = false) =
+                    emit(JSONObject().put("type", "action").put("id", id).put("phase", phase).put("text", text).put("ok", ok))
+                val handled = engine.start(body.optString("text"), body.optString("profile"),
+                    progress = { event("progress", it) }, finished = { result, ok -> event("result", result, ok) })
+                if (!handled) event("pass")
+            }
+            "action-stop" -> if (engineDelegate.isInitialized()) engine.cancel()
+            "action-history" -> emit(JSONObject().put("type", "action-history").put("entries", CortexActionState.history(context)))
+            "gate-state" -> CortexActionState.setGate(body.optString("mode"))
+            "support-notify-config" -> CortexSupportNotification.configure(context, body.optBoolean("enabled"))
+            "support-notification" -> body.optJSONArray("ids")?.let {
+                CortexSupportNotification.update(context, it, body.optBoolean("seen"))
             }
             "voice-start" -> {
                 val id = body.optString("id")
@@ -104,6 +125,10 @@ internal class CortexDeviceBridge(
         }
     }
 
+    override fun close() {
+        if (engineDelegate.isInitialized()) engine.close()
+    }
+
     private fun requestPermission(name: String) {
         if (Build.VERSION.SDK_INT >= 23 && activity.checkSelfPermission(name) != PackageManager.PERMISSION_GRANTED) {
             if (name == Manifest.permission.POST_NOTIFICATIONS && Build.VERSION.SDK_INT < 33) return
@@ -115,9 +140,13 @@ internal class CortexDeviceBridge(
         val obj = JSONObject().put("type", "permissions")
             .put("microphone", Build.VERSION.SDK_INT < 23 || activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
             .put("notifications", Build.VERSION.SDK_INT < 33 || activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
-            .put("screenLock", dpm.isAdminActive(ComponentName(context, CortexDeviceAdmin::class.java)))
+            .put("screenLock", dpm.isAdminActive(ComponentName(context, CortexDeviceAdmin::class.java)) ||
+                (Build.VERSION.SDK_INT >= 28 && CortexScreenService.connected != null))
+            .put("screenLockSupported", true)
+            .put("screenAutomation", CortexScreenService.connected != null)
+            .put("capabilities", phone.capabilities())
             .put("brightness", Settings.System.canWrite(context))
-            .put("verifyApps", false)
+            .put("verifyApps", CortexScreenService.connected != null)
             .put("overlay", Settings.canDrawOverlays(context))
         emit(obj)
     }
@@ -127,16 +156,26 @@ internal class CortexDeviceBridge(
             val e = JSONObject().put("type", "image")
             if (resultCode == Activity.RESULT_OK && data?.data != null) {
                 val value = runCatching {
-                    context.contentResolver.openInputStream(data.data!!)?.use { stream ->
-                        val source = BitmapFactory.decodeStream(stream) ?: return@use null
-                        val scaled = if (source.width > 1152 || source.height > 1152) {
-                            val ratio = 1152.0 / maxOf(source.width, source.height)
-                            Bitmap.createScaledBitmap(source, (source.width * ratio).toInt(), (source.height * ratio).toInt(), true)
-                        } else source
-                        val out = ByteArrayOutputStream()
-                        scaled.compress(Bitmap.CompressFormat.JPEG, 78, out)
-                        "data:image/jpeg;base64," + android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
-                    }
+                    val uri = requireNotNull(data.data)
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+                    require(bounds.outWidth > 0 && bounds.outHeight > 0)
+                    var sample = 1
+                    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 1500) sample *= 2
+                    val bitmap = context.contentResolver.openInputStream(uri)?.use {
+                        BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+                    } ?: return@runCatching null
+                    try {
+                        val output = ByteArrayOutputStream()
+                        for (quality in listOf(82, 68, 54, 40, 28)) {
+                            output.reset()
+                            if (bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output) && output.size() <= 174_000) {
+                                return@runCatching "data:image/jpeg;base64," +
+                                    android.util.Base64.encodeToString(output.toByteArray(), android.util.Base64.NO_WRAP)
+                            }
+                        }
+                        null
+                    } finally { bitmap.recycle() }
                 }.getOrNull()
                 e.put("ok", !value.isNullOrBlank())
                 if (!value.isNullOrBlank()) e.put("data", value)

@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
@@ -19,6 +20,9 @@
         <package android:name="com.instagram.android" />
         <package android:name="com.google.android.youtube" />
         <package android:name="com.android.chrome" />
+        <package android:name="com.yandex.browser" />
+        <package android:name="ru.yandex.searchplugin" />
+        <package android:name="com.android.vending" />
         <intent><action android:name="android.speech.RecognitionService" /></intent>
         <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent>
     </queries>
@@ -39,6 +43,18 @@
         </service>
         <service android:name=".CortexWakeService" android:exported="false"
             android:foregroundServiceType="microphone" />
+        <service android:name=".CortexScreenService" android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:label="@string/cortex_screen_service">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/cortex_screen_service" />
+        </service>
+        <activity android:name=".CortexConfirmationActivity" android:exported="false"
+            android:excludeFromRecents="true" android:theme="@android:style/Theme.DeviceDefault.Dialog.NoActionBar" />
+        <service android:name=".CortexSupportJob" android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <receiver android:name=".CortexStopReceiver" android:exported="false" />
         <receiver android:name=".CortexDeviceAdmin" android:exported="true"
             android:permission="android.permission.BIND_DEVICE_ADMIN">
             <meta-data android:name="android.app.device_admin" android:resource="@xml/cortex_screen_admin" />

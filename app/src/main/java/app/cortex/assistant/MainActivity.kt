@@ -114,16 +114,26 @@ class MainActivity : Activity() {
     }
     override fun onResume() {
         super.onResume()
+        CortexRuntime.setAppVisible(true)
+        notifyVisibility(true)
         if (::device.isInitialized) device.refreshPermissions()
         if (::island.isInitialized) { island.refresh(); island.ensureIsland() }
     }
     override fun onPause() {
+        CortexRuntime.setAppVisible(false)
+        notifyVisibility(false)
         if (::speech.isInitialized) speech.stop()
         super.onPause()
     }
+    private fun notifyVisibility(visible: Boolean) {
+        if (::webView.isInitialized) webView.evaluateJavascript(
+            "window.cortexAppVisible=$visible;window.dispatchEvent(new Event('cortex-app-visibility'));", null)
+    }
+
     override fun onSaveInstanceState(outState: Bundle) { webView.saveState(outState); super.onSaveInstanceState(outState) }
     override fun onDestroy() {
         if (::speech.isInitialized) speech.close()
+        if (::device.isInitialized) device.close()
         if (::server.isInitialized) server.close()
         if (::island.isInitialized) island.close()
         if (::webView.isInitialized) { (webView.parent as? FrameLayout)?.removeView(webView); webView.destroy() }

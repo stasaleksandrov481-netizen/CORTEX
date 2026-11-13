@@ -17,6 +17,8 @@ const CortexApi = (() => {
     auth_denied: "Google не подтвердил вход. Попробуйте снова.",
     account_forbidden: "У этого аккаунта пока нет доступа к CORTEX.",
     storage_config: "Сервис CORTEX временно недоступен.",
+    maintenance: "Идут технические работы. Попробуйте позже.",
+    update: "Для продолжения обновите CORTEX.",
     sign_in: "Для этого действия нужен вход в профиль.",
     provider_key: "OpenRouter отклонил серверный ключ. Нужна проверка подключения.",
     provider_budget: "Исчерпан бюджет серверного ключа OpenRouter.",

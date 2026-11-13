@@ -52,8 +52,8 @@ internal class IslandPlacement(
         val cutout = camera?.bounds
         val edge = camera?.edge
         val offCenter = cutout != null && abs(cutout.exactCenterX() - middle) > bounds.width() * .18f
-        val bodyWidth = minOf((if (hasStatus) 172 else 94) * density, safe.width()).coerceAtLeast(1f)
-        val bodyHeight = minOf(30 * density, safe.height()).coerceAtLeast(1f)
+        val bodyWidth = minOf((if (hasStatus) 198 else 99) * density, safe.width()).coerceAtLeast(1f)
+        val bodyHeight = minOf(32 * density, safe.height()).coerceAtLeast(1f)
         val gap = 5 * density
         val left = when {
             cutout == null -> middle - bodyWidth / 2
@@ -82,7 +82,7 @@ internal class IslandPlacement(
         panel = RectF(panelX, panelY, panelX + panelWidth, panelY + panelHeight)
 
         collapsedFrame = frame(bounds, compact, 10 * density, 76 * density)
-        expandedFrame = frame(bounds, panel, 10 * density, 76 * density)
+        expandedFrame = frame(bounds, panel, 16 * density, 76 * density)
     }
 
     private fun anchorFor(camera: IslandCutout, display: Rect, offCenter: Boolean, density: Float): IslandAnchor {

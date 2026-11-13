@@ -1,81 +1,153 @@
 "use strict";
-(() => {
-  const api = window.CortexApi;
-  if (!api?.available) return;
-  let gate = {mode:"open"}, active = false;
-  const layer = document.createElement("div");
-  layer.className = "cortex-guard"; layer.hidden = true;
-  layer.innerHTML = '<div class="cortex-guard-halo"><img src="art/mark.svg" alt=""></div><p class="cortex-eyebrow">C O R T E X / S Y S T E M</p><h1></h1><p class="cortex-guard-copy"></p><div class="cortex-guard-actions"><button type="button" data-gate-retry>Проверить снова</button><button type="button" data-gate-update hidden>Обновить CORTEX</button></div><small>CORTEX · На связи</small>';
+
+window.CortexControl = (() => {
+  const api = CortexApi;
+  if (!api?.available) return { back: () => false, refresh() {} };
+  const { esc, icon } = CortexUI;
+  const device = window.CortexDevice;
+  const visible = () => !document.hidden && window.cortexAppVisible !== false;
+  const send = (operation, fields = {}) => device?.postMessage(JSON.stringify({ operation, ...fields }));
+  const layer = document.createElement("section");
+  layer.className = "cortex-guard";
+  layer.hidden = true;
+  layer.innerHTML = '<div class="cortex-guard-halo"><img src="art/mark.svg" alt=""></div><h1></h1><p class="cortex-guard-copy"></p>' +
+    '<div class="cortex-guard-actions"><button type="button" data-gate-retry>Проверить снова</button>' +
+    '<button type="button" data-gate-update hidden>Обновить CORTEX</button><button type="button" data-gate-login hidden>Войти в профиль</button><button type="button" data-gate-admin>Панель управления</button></div>';
   document.body.append(layer);
-  const button = layer.querySelector("[data-gate-update]");
-  function access(data) {
-    if (!data || typeof data !== "object") return;
-    gate = data;
-    const locked = gate.mode === "maintenance" || gate.mode === "update";
-    layer.hidden = !locked;
-    if (!locked) return;
+  const update = layer.querySelector("[data-gate-update]");
+  let gate = { mode: "open" }, checking = false, again = false;
+  function applyGate(value, google) {
+    if (!["open", "maintenance", "update"].includes(value?.mode)) return;
+    gate = value;
+    layer.hidden = gate.mode === "open";
+    send("gate-state", { mode: gate.mode });
+    if (layer.hidden) return;
     layer.querySelector("h1").textContent = gate.mode === "maintenance" ? "Технические работы" : "Требуется обновление";
-    layer.querySelector(".cortex-guard-copy").textContent = String(gate.message || "CORTEX временно недоступен.").slice(0,400);
-    button.hidden = gate.mode !== "update" || !/^https:\/\//.test(gate.update_url || "");
-    for (const selector of ["#sheet","#history"]) {
-      const d = document.querySelector(selector);
-      if (d?.open) d.close();
+    layer.querySelector(".cortex-guard-copy").textContent = String(gate.message || "CORTEX временно недоступен.").slice(0, 400);
+    layer.querySelector("[data-gate-login]").hidden = !google;
+    update.hidden = gate.mode !== "update" || !/^https:\/\//.test(gate.update_url || "");
+  }
+
+  async function check() {
+    if (!visible()) return;
+    if (checking) { again = true; return; }
+    checking = true;
+    try { const status = await api.request("status"); applyGate(status.gate, status.google === true); }
+    catch { /* Keep the last verified state until the connection returns. */ }
+    finally {
+      checking = false;
+      if (again) { again = false; void check(); }
     }
   }
-  async function check() {
-    if (active || document.hidden) return;
-    active = true;
-    try { const status = await api.request("status"); access(status.gate); } catch {}
-    finally { active = false; }
-  }
-  layer.querySelector("[data-gate-retry]").addEventListener("click",check);
-  button.addEventListener("click",() => {
-    if (/^https:\/\//.test(gate.update_url || "")) window.CortexDevice?.postMessage(JSON.stringify({operation:"open-link",url:gate.update_url}));
+  layer.querySelector("[data-gate-retry]").addEventListener("click", check);
+  layer.querySelector("[data-gate-login]").addEventListener("click", () => window.cortexAdminLogin?.());
+  layer.querySelector("[data-gate-admin]").addEventListener("click", () => send("open-link", { url: "https://cortex-control-phi.vercel.app/" }));
+  update.addEventListener("click", () => {
+    if (/^https:\/\//.test(gate.update_url || "")) send("open-link", { url: gate.update_url });
   });
-  const session = crypto.randomUUID?.() || "10000000-1000-4000-8000-"+Date.now().toString(16).padStart(12,"0").slice(-12);
+
+  const session = crypto.randomUUID();
   let lastHeartbeat = 0;
   async function heartbeat() {
-    if (document.hidden || Date.now()-lastHeartbeat < 35000) return;
+    if (!visible() || Date.now() - lastHeartbeat < 42_000) return;
     lastHeartbeat = Date.now();
-    try {
-      const result = await api.request("presence",{payload:{session_id:session,screen:document.querySelector("#screen")?.dataset.route||"home"}});
-      access(result.gate);
-    } catch {}
+    try { await api.request("presence", { payload: { session_id: session, screen: document.querySelector("#screen")?.dataset.route || "home" } }); }
+    catch { /* Presence is retried on the next interval. */ }
   }
-  function refresh() { if (!document.hidden) { void check(); void heartbeat(); } }
-  document.addEventListener("visibilitychange",refresh);
-  window.addEventListener("cortex-app-visibility",refresh);
+
   const inbox = document.createElement("dialog");
   inbox.className = "cortex-inbox";
-  inbox.innerHTML = '<header><h2>Мои обращения</h2><button type="button" data-close aria-label="Закрыть">×</button></header><main class="cortex-inbox-main"></main>';
+  inbox.innerHTML = '<header><h2>Мои обращения</h2><button type="button" data-close aria-label="Закрыть">×</button></header>' +
+    '<main class="cortex-inbox-main"></main>';
   document.body.append(inbox);
-  inbox.querySelector("[data-close]").addEventListener("click",()=>inbox.close());
-  const esc = value => String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  inbox.querySelector("[data-close]").addEventListener("click", () => inbox.close());
+  const host = inbox.querySelector(".cortex-inbox-main");
+  const statusLabels = {
+    new: "Новое", open: "Открыто", received: "Получено", pending: "Ожидает", in_progress: "В работе",
+    answered: "Есть ответ", resolved: "Решено", closed: "Закрыто"
+  };
+  let inboxRequest;
+  const repliesOf = data => Array.isArray(data?.replies) ? data.replies : [];
+  const replyIds = data => repliesOf(data).map(reply => reply.id).filter(id => typeof id === "string");
+  function fetchInbox() {
+    const owner = Cortex.state.account?.id || "";
+    if (inboxRequest?.owner === owner) return inboxRequest.result;
+    inboxRequest?.controller.abort();
+    const pending = { owner, controller: new AbortController() };
+    pending.result = api.request("support-inbox", {}, { signal: pending.controller.signal }).then(data => {
+      if ((Cortex.state.account?.id || "") !== owner) throw api.failure("sign_in");
+      return data;
+    }).finally(() => { if (inboxRequest === pending) inboxRequest = null; });
+    inboxRequest = pending;
+    return pending.result;
+  }
+  function renderInbox(data) {
+    const replies = repliesOf(data);
+    if (!data?.tickets?.length) { host.textContent = "Обращений пока нет."; return; }
+    host.innerHTML = data.tickets.map(ticket => {
+      const thread = replies.filter(reply => reply.ticket_id === ticket.id).sort((a, b) => a.created_at.localeCompare(b.created_at));
+      const date = new Date(ticket.created_at).toLocaleDateString("ru-RU");
+      return '<article><header><small>' + esc(date) + ' · № ' + esc(String(ticket.id).slice(0, 8).toUpperCase()) +
+        '</small><span class="ticket-status">' + esc(statusLabels[ticket.status] || ticket.status) + '</span></header><p>' + esc(ticket.message) + '</p>' +
+        thread.map(reply => '<aside><small>Поддержка CORTEX · ' + esc(new Date(reply.created_at).toLocaleString("ru-RU")) +
+          '</small><p>' + esc(reply.message) + '</p></aside>').join("") + '</article>';
+    }).join("");
+  }
   async function openInbox() {
-    inbox.showModal();
-    const host = inbox.querySelector(".cortex-inbox-main"); host.textContent = "Проверяем ответы поддержки…";
+    if (!inbox.open) inbox.showModal();
+    host.textContent = "Загружаю обращения…";
     try {
-      const r = await api.request("support-inbox"), replies = r.replies || [];
-      if (!r.tickets?.length) { host.textContent = "Обращений пока нет."; return; }
-      host.innerHTML = r.tickets.map(t => '<article><small>'+esc(new Date(t.created_at).toLocaleDateString("ru-RU"))+' · '+esc(t.status)+'</small><p>'+esc(t.message)+'</p>'+
-        replies.filter(x=>x.ticket_id===t.id).map(x=>'<aside><small>CORTEX SUPPORT</small><p>'+esc(x.message)+'</p></aside>').join("")+'</article>').join("");
-    } catch { host.textContent = "Не удалось получить ответы. Проверьте подключение."; }
+      const data = await fetchInbox();
+      if (!inbox.open) return;
+      renderInbox(data);
+      send("support-notification", { ids: replyIds(data), seen: true });
+    } catch {
+      if (!inbox.open) return;
+      host.innerHTML = '<p>Не удалось загрузить обращения.</p><button type="button" data-inbox-retry>Повторить</button>';
+      host.querySelector("[data-inbox-retry]").addEventListener("click", openInbox);
+    }
   }
-  let scheduled = false;
+  let lastInboxCheck = 0;
+  async function checkReplies() {
+    if (!visible() || !Cortex.state.preferences.notifyReplies || Date.now() - lastInboxCheck < 45_000) return;
+    lastInboxCheck = Date.now();
+    try {
+      const data = await fetchInbox();
+      if (inbox.open) renderInbox(data);
+      send("support-notification", { ids: replyIds(data), seen: inbox.open });
+    } catch { /* Retry at the next interval. */ }
+  }
+  function refresh() {
+    if (!visible()) return;
+    void check();
+    void heartbeat();
+    void checkReplies();
+  }
+  const screen = document.getElementById("screen");
   function attachInbox() {
-    const group=document.querySelector("#screen.support-screen .tile-group");
+    const group = document.querySelector("#screen.support-screen .tile-group");
     if (!group || group.querySelector("[data-my-tickets]")) return;
-    const btn=document.createElement("button");
-    btn.type="button";btn.className="tile";btn.dataset.myTickets="true";
-    btn.innerHTML='<span class="tile-glyph">✉</span><span class="tile-copy"><strong>Мои обращения</strong><small>Сообщения и ответы команды CORTEX</small></span><span aria-hidden="true">›</span>';
-    btn.addEventListener("click",openInbox);group.prepend(btn);
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "tile"; button.dataset.myTickets = "true";
+    button.innerHTML = '<span class="tile-glyph">' + icon("message", 20) +
+      '</span><span class="tile-copy"><strong>Мои обращения</strong><small>Статусы и ответы поддержки</small></span><span aria-hidden="true">›</span>';
+    button.addEventListener("click", openInbox);
+    group.prepend(button);
   }
-  const screen=document.querySelector("#screen");
-  if (screen) new MutationObserver(()=>{
-    if (scheduled) return;scheduled=true;
-    requestAnimationFrame(()=>{scheduled=false;attachInbox();});
-  }).observe(screen,{childList:true});
+  new MutationObserver(attachInbox).observe(screen, { childList: true });
   attachInbox();
-  setTimeout(refresh,1900);
-  setInterval(refresh,45000);
+  document.addEventListener("visibilitychange", refresh);
+  window.addEventListener("cortex-app-visibility", refresh);
+  window.addEventListener("cortex-account-changed", () => {
+    inboxRequest?.controller.abort();
+    inboxRequest = null;
+    if (inbox.open) inbox.close();
+    host.textContent = "";
+    lastInboxCheck = 0;
+    refresh();
+  });
+  setTimeout(refresh, 1100);
+  setInterval(refresh, 45_000);
+
+  return { refresh, back() { if (!inbox.open) return false; inbox.close(); return true; } };
 })();
