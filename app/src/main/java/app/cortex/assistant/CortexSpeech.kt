@@ -72,6 +72,7 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1_250L)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
             r.startListening(intent)
         } catch (_: Exception) {

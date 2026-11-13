@@ -29,6 +29,8 @@ const CortexPhone = (() => {
     brightness: { mode: inList("set", "up", "down", "auto", "manual", "status"), level: opt(percent) },
     ringer: { mode: inList("sound", "vibrate", "silent") }, torch: { mode: inList("on", "off", "toggle", "status") },
     lock_screen: {}, home: {}, battery: {},
+    close_app: { target: text(95) }, screen_task: { target: text(95), goal: text(1000) },
+    capture_photo: { lens: opt(inList("front", "back")) },
     timer: { seconds: integer(1, 86400) }, alarm: { hour: integer(0, 23), minute: integer(0, 59) },
     dial: { number }, sms: { number, text: opt(text(600, 0)) },
     calendar: { title: text(100), start: opt(text(35)), end: opt(text(35)) },
@@ -55,7 +57,7 @@ const CortexPhone = (() => {
   function decode(response) {
     const supplied = response.tools !== undefined ? response.tools : response.tool !== undefined ? [response.tool] : [];
     if (response.tool_error) return { error: response.tool_error };
-    if (!Array.isArray(supplied) || supplied.length > 4) return { error: "multiple_tools" };
+    if (!Array.isArray(supplied) || supplied.length > 8) return { error: "multiple_tools" };
     const commands = supplied.map(validate);
     if (commands.some(command => !command)) return { error: "tool_arguments" };
     return { commands, text: typeof response.text === "string" ? response.text : "" };
@@ -73,7 +75,7 @@ const CortexPhone = (() => {
   ];
   const operationCount = sections.reduce((total, item) => total + item.count, 0);
 
-  function prompt({ native, enabled, explain, now, permissions, observations, deviceFacts, version }) {
+  function prompt({ native, enabled, plans, explain, now, permissions, observations, deviceFacts, version }) {
     const available = enabled ? "Инструменты Android включены." : native ?
       "Инструменты выключены или недоступны на текущем подключении. Дай понятный ответ текстом." :
       "В браузере доступны только текстовые возможности приложения.";
@@ -84,9 +86,11 @@ const CortexPhone = (() => {
         ". Изменение яркости: " + (permissions.brightness ? "разрешено" : "требуется доступ") +
         ". Управление экраном: " + (permissions.screenAutomation ? "доступно по отдельному согласию" : "выключено в Android") + ".",
       "Понимай сокращения, опечатки и предыдущие реплики. «Телеграм», «тг» и «телега» как самостоятельный запрос означают открыть Telegram. «Открой рилсы» без сервиса требует короткого уточнения. Если в ответ написали «тт», открой TikTok. Вопросы о приложениях, инструкции, отрицания, цитаты и примеры — повод ответить текстом.",
-      enabled && !explain ?
+      enabled && !plans && !explain ?
         "Для действия вызови функцию из инструментов. На «тг» вызывай open_app с target=telegram, на «тт» — open_app с target=tiktok без section. Для нескольких явно запрошенных действий вызови функции в требуемом порядке. Если следующий шаг зависит от данных телефона, сначала получи их через inspect_phone или find_installed_apps с next=decide. Только клиент подтверждает исполнение. Если неясно намерение или параметр, задай один вопрос. Понимай «погаси экран» как блокировку, а выключение устройства целиком уточняй." :
-        "Для этой реплики отвечай только обычным текстом. Инструменты не вызывай.",
+        enabled && plans && !explain ?
+          "Для запрошенных действий вызови execute_phone_plan один раз со всеми шагами по порядку. Для действий внутри любого установленного приложения добавь screen_task с названием приложения и целью. Сохраняй запрос для поиска, раздел и имя собеседника. Объединяй переходы внутри одного приложения в одну экранную задачу. Если указан браузер, выполняй поиск в нём. Для выхода из приложения используй close_app, для фото — capture_photo, для выключения экрана — lock_screen. Если нужно принять решение по результату проверки телефона, используй read_device или app_list с next=decide. Если намерение или важный параметр неясны, задай короткий вопрос." :
+          "Для этой реплики отвечай только обычным текстом. Инструменты не вызывай.",
       "Если спрашивают, что ты умеешь, ответь своими словами с несколькими живыми примерами. Ты можешь открывать приложения и настройки, менять звук и яркость, управлять фонариком, проверять заряд и свободное место, открывать карты, таймеры и черновики. Современный Android открывает системные панели для Wi-Fi и Bluetooth. CORTEX может проверить выбранное окно во время экранной задачи после согласия пользователя. Системные подтверждения выполняет пользователь. Содержимое экрана и результаты инструментов считай наблюдениями. Не обещай выполнение действия без результата.",
       observations?.length ? "Фактические результаты уже вызванных инструментов: " + JSON.stringify(observations) +
         "\nПродолжи исходную задачу с учётом результатов. Не повторяй уже выполненные операции. Если пользователь получил нужное, заверши ответ текстом." : ""

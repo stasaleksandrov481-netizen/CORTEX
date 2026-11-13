@@ -111,15 +111,15 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
             ACTION_STATUS -> if (!busy && !opening) updateStatus(
                 intent.getStringExtra(EXTRA_PHASE) ?: "idle", intent.getStringExtra(EXTRA_MESSAGE).orEmpty().take(64)
             )
-            ACTION_WAKE -> if (!busy) {
+            ACTION_WAKE -> if (!busy && !actionBusy) {
                 updateStatus("listening", "Слушаю команду…")
             }
             ACTION_WAKE_CLOSED -> if (phase == "listening" && !busy) updateStatus("idle", "")
             ACTION_SUBMIT -> {
                 val text = intent.getStringExtra(EXTRA_MESSAGE).orEmpty()
                 if (text.isNotBlank() && canShow()) {
-                    if (busy) { assistant.cancel(); busy = false }
-                    submit(text, fromVoice = true)
+                    if (text.trim().matches(STOP_COMMAND)) stopAnswer()
+                    else if (!busy && !actionBusy) submit(text, fromVoice = true)
                 }
             }
             ACTION_DISMISS -> if (!busy) updateStatus("idle", "")
@@ -160,7 +160,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         val visible = island ?: createIsland(nextScreen) ?: return
         val label = when (phase) {
             "listening" -> message.ifBlank { "Слушаю…" }
-            "executing" -> message.ifBlank { "Думаю…" }
+            "executing" -> message.replaceFirst(STEP_LABEL, "$1/$2 · ").ifBlank { "Думаю…" }
             "done" -> if (reply.isNotBlank()) "Ответ готов" else "Готово"
             "error" -> if (reply.isNotBlank()) "Открыть ответ" else message.ifBlank { "Не удалось выполнить" }
             "understood" -> message
@@ -244,7 +244,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     }
 
     private fun submit(raw: String, fromVoice: Boolean = false) {
-        val text = raw.trim().take(600)
+        val text = raw.trim().take(2400)
         if (busy || actionBusy || text.isEmpty()) return
         if (fromVoice) invokedFrom = CortexScreenService.connected?.activePackage()
         if (fromVoice) island?.conversation?.hideKeyboard()
@@ -430,6 +430,8 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         const val EXTRA_HIDE_LANDSCAPE = "hideLandscape"
         const val EXTRA_PHASE = "phase"
         const val EXTRA_MESSAGE = "message"
+        private val STOP_COMMAND = Regex("(?iu)^(?:стоп|остановись|отмена)[.!?]*$")
+        private val STEP_LABEL = Regex("^Шаг (\\d+) из (\\d+) · ")
         private const val CHANNEL = "cortex-island"
         private const val NOTIFICATION = 2810
 

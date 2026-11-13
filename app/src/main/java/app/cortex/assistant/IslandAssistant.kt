@@ -31,13 +31,19 @@ internal class IslandAssistant(context: Context) : AutoCloseable {
             "Ты CORTEX, голосовой помощник Android. Пиши живо, дружелюбно и по делу. " +
                 "Представляйся только по просьбе. Продолжай разговор с учётом предыдущих реплик. " +
                 "Отвечай на языке пользователя. Учитывай состояние телефона и выданные разрешения. " +
-                (if (tools) "Используй Android-инструменты, если пользователь просит конкретное действие. " else "Сейчас доступен только разговор. ") +
+                (if (tools) """Для явно запрошенных действий вызови execute_phone_plan один раз со всеми шагами в исходном порядке.
+                    Для действий внутри любого установленного приложения добавь screen_task с названием приложения и конкретной целью.
+                    Открытие раздела, поиск, переход к переписке и ввод текста внутри приложения — задачи экрана.
+                    Открытие приложения без дальнейших действий — app. Для выхода из него используй close_app.
+                    Для фото добавь capture_photo, для выключения экрана — lock_screen. Если пользователь говорит «здесь», можно использовать текущее приложение.
+                    Текущее приложение: """ + (currentPackage?.let(phone::resolveApp)?.name ?: "неизвестно") + ". "
+                else "Сейчас доступен только разговор. ") +
                 "Результат действия подтверждает Android. Данные устройства: " + phone.capabilities()))
         history.forEach { (input, output) -> messages.put(message("user", input)).put(message("assistant", output)) }
         messages.put(message("user", text))
         val route = if (profile == "deep") "deep" else "fast"
         val payload = JSONObject().put("messages", messages).put("style", "brief").put("profile", route)
-        if (tools) payload.put("device_tools", true)
+        if (tools) payload.put("device_tools", true).put("action_plan", true)
         request = gateway.chat(payload, { event ->
             if (turn == generation && event.optString("status") == "fallback") progress("Пробую резервную модель…")
             if (turn == generation && event.has("delta") && !tools) delta(event.optString("delta"))
@@ -52,7 +58,13 @@ internal class IslandAssistant(context: Context) : AutoCloseable {
                 tools && result.has("tool_error") -> finish("Уточните действие или его параметры.", false)
                 tools && (result.has("tool") || result.has("tools")) -> {
                     val commands = result.optJSONArray("tools") ?: JSONArray().put(result.optJSONObject("tool"))
-                    runActions(turn, commands, toolsAllowed, progress, ::finish)
+                    if (!toolsAllowed()) {
+                        finish("Управление устройством выключено.", false)
+                        return@chat
+                    }
+                    val actions = (0 until commands.length()).mapNotNull(commands::optJSONObject)
+                    if (actions.size != commands.length()) finish("Не удалось прочитать план действий.", false)
+                    else engine.runPlan(actions, text, profile, beforeScreen, progress) { finish(it.text, it.ok) }
                 }
                 else -> {
                     val plain = result.optString("text").trim()
@@ -65,30 +77,6 @@ internal class IslandAssistant(context: Context) : AutoCloseable {
             }
         }
     }
-
-    private fun runActions(turn: Long, commands: JSONArray, allowed: () -> Boolean, progress: (String) -> Unit,
-                           finished: (String, Boolean) -> Unit) {
-        val reports = mutableListOf<String>()
-        val actions = (0 until minOf(commands.length(), 4)).mapNotNull(commands::optJSONObject)
-            .onEach { it.remove("next") }.distinctBy(JSONObject::toString)
-        fun next(index: Int) {
-            if (turn != generation) return
-            if (!allowed()) { finished("Управление устройством выключено.", false); return }
-            if (index >= actions.size) { finished(reports.joinToString("\n").ifBlank { "Уточните команду." }, reports.isNotEmpty()); return }
-            val command = actions[index]
-            progress("Выполняю шаг " + (index + 1))
-            phone.executeChecked(command, { turn == generation && allowed() }) { outcome ->
-                val status = outcome.optString("status")
-                CortexActionState.log(phoneContext, "Команда Android: " + command.optString("kind") + " · " + status)
-                reports += CortexPhoneResult.describe(command, outcome)
-                if (status == "done" && command.optString("kind") != "lock_screen") next(index + 1)
-                else finished(reports.joinToString("\n"), status in setOf("done", "opened", "panel"))
-            }
-        }
-        next(0)
-    }
-
-    private val phoneContext = context.applicationContext
 
     fun cancel() {
         ++generation

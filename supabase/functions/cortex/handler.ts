@@ -143,11 +143,16 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
 
   let providerCache: { value: Promise<string>; until: number } | undefined;
   function providerKey(): Promise<string> {
-    if (environmentModelKey) return Promise.resolve(environmentModelKey);
     if (providerCache && providerCache.until > Date.now()) return providerCache.value;
-    const value = database<string | null>("rpc/cortex_provider_key", "POST", {}).then(key => key?.trim() || "");
+    // A rotated Vault entry takes priority over the deployment default.
+    const value = database<string | null>("rpc/cortex_provider_key", "POST", {})
+      .then(key => key?.trim() || environmentModelKey)
+      .catch(error => {
+        if (providerCache?.value === value) providerCache = undefined;
+        if (environmentModelKey) return environmentModelKey;
+        throw error;
+      });
     providerCache = { value, until: Date.now() + 30_000 };
-    void value.catch(() => { if (providerCache?.value === value) providerCache = undefined; });
     return value;
   }
 
@@ -362,7 +367,7 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
         return json({
           service: "CORTEX", configured: Boolean(storage && key), provider: "openrouter_free",
           google: googleReady, account, guest: guests, support: storage, device_tools: true,
-          device_profiles: true, device_repair: true, model_fallback: true,
+          device_profiles: true, device_repair: true, device_action_plan: true, model_fallback: true,
           ...(storage ? { gate: await control.gate(request, account?.id) } : { fault: "storage_config" }),
         });
       }
@@ -392,7 +397,7 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
         const caller = await actor(request);
         const isChat = path === "/v1/chat";
         const input = isChat ? chatInput(await body(request, 260_000)) : {
-          messages: [{ role: "user", content: "Reply with just OK." }] as const, limit: 512, device: false, repair: false, profile: undefined,
+          messages: [{ role: "user", content: "Reply with just OK." }] as const, limit: 512, device: false, repair: false, plan: false, profile: undefined,
         };
         const gate = await control.gate(request, caller.account?.id);
         if (gate.mode !== "open") throw new Failure(gate.mode, 403);
@@ -452,7 +457,7 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
                 throw new Failure(failure.code, failure.status, Math.ceil((until - Date.now()) / 1000));
               }
               const result = await completion(network, key, [model], [...input.messages], isChat, input.limit, signal,
-                input.device, input.repair, firstTokenMs, quick);
+                input.device, input.repair, firstTokenMs, quick, input.plan);
               modelCooldown.delete(scope + model);
               return result;
             } catch (error) {
@@ -478,7 +483,7 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
           }
           throw new Failure("model", 502);
         }
-        return new Response(relay(response, getResponse, input.device, input.repair, next > 1, () => upstream.abort()), {
+        return new Response(relay(response, getResponse, input.device, input.repair, next > 1, () => upstream.abort(), input.plan), {
           headers: { ...JSON_HEADERS, "Content-Type": "text/event-stream; charset=utf-8", "X-Accel-Buffering": "no" },
         });
       }

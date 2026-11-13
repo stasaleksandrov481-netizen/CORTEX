@@ -56,13 +56,33 @@ internal class CortexDeviceBridge(
                     reply(result)
                 }
             }
-            "action-start" -> {
+            "action-start", "action-plan" -> {
                 val id = body.optString("id")
                 fun event(phase: String, text: String = "", ok: Boolean = false) =
                     emit(JSONObject().put("type", "action").put("id", id).put("phase", phase).put("text", text).put("ok", ok))
-                val handled = engine.start(body.optString("text"), body.optString("profile"),
-                    progress = { event("progress", it) }, finished = { result, ok -> event("result", result, ok) })
-                if (!handled) event("pass")
+                val request = body.optString("text")
+                val profile = body.optString("profile")
+                if (body.optString("operation") == "action-plan") {
+                    val commands = body.optJSONArray("commands")
+                    if (commands == null || commands.length() !in 1..CortexActionSequence.MAX_STEPS) {
+                        event("result", "Уточните шаги задачи.")
+                        return
+                    }
+                    val steps = (0 until commands.length()).mapNotNull(commands::optJSONObject)
+                    if (steps.size != commands.length()) {
+                        event("result", "План действий не удалось прочитать.")
+                        return
+                    }
+                    engine.runPlan(steps, request, profile, progress = { event("progress", it) }) { result ->
+                        emit(JSONObject().put("type", "action").put("id", id).put("phase", "result")
+                            .put("text", result.text).put("ok", result.ok).put("external", result.external)
+                            .put("observations", result.observations).put("blocked", result.blocked))
+                    }
+                } else {
+                    val handled = engine.start(request, profile,
+                        progress = { event("progress", it) }, finished = { result, ok -> event("result", result, ok) })
+                    if (!handled) event("pass")
+                }
             }
             "action-stop" -> if (engineDelegate.isInitialized()) engine.cancel()
             "action-history" -> emit(JSONObject().put("type", "action-history").put("entries", CortexActionState.history(context)))

@@ -86,9 +86,53 @@ const definitions = [
   }, ["title"]),
 ];
 
+const planDefinitions = [
+  define("run_screen_task", "screen_task", "Carry out a task inside any installed Android app using visible controls. Pass the app name and the user's specific goal, including the exact search text, section, recipient, or item they requested. Combine navigation within the same app into one screen task.", {
+    target: text(95, "Name or package of the Android app"), goal: text(1000, "User's exact goal inside that app"),
+  }),
+  define("leave_app", "close_app", "Leave a named Android app and return to the home screen if that app is in the foreground.", {
+    target: text(95),
+  }),
+  define("capture_photo", "capture_photo", "Take a photo with a visible Android camera preview when the user explicitly requests a picture. Specify the front lens for a selfie. Do not use for opening the camera without taking a photo.", {
+    lens: choice("back", "front"),
+  }, []),
+];
+export const MAX_PLAN_STEPS = 8;
 export const deviceTools = definitions.map(definition => definition.tool);
+const actions = new Map([...definitions, ...planDefinitions].map(definition => [definition.kind, definition]));
+const planName = "execute_phone_plan";
+const stepProperties: Record<string, Property> = { kind: choice(...actions.keys()) };
+for (const { tool } of actions.values()) {
+  for (const [key, property] of Object.entries(tool.function.parameters.properties)) {
+    stepProperties[key] ??= property.type === "string" ? { type: "string" } : { type: "integer" };
+  }
+}
+export const planGuide = [...actions.values()].map(({ kind, tool }) => {
+  const { description, parameters: { properties, required } } = tool.function;
+  const fields = Object.entries(properties).map(([key, field]) => {
+    const values = field.enum && field.enum.length <= 12 ? "=" + field.enum.join("/") : "";
+    return key + (required.includes(key) ? "" : "?") + values;
+  });
+  return `${kind}(${fields.join(", ")}) — ${description}`;
+}).join("\n");
+export const planTools = [{
+  type: "function",
+  function: {
+    name: planName,
+    description: "Send the complete ordered plan for the user's Android request in one call. Include every requested action, including actions after opening an app. Use screen_task for tasks inside a named app, close_app to leave it, and lock_screen to turn off the screen.",
+    parameters: {
+      type: "object", required: ["steps"], additionalProperties: false,
+      properties: { steps: {
+        type: "array", minItems: 1, maxItems: MAX_PLAN_STEPS,
+        description: "The steps in the user's requested order. Each step contains a kind and its own arguments.",
+        items: { type: "object", required: ["kind"], additionalProperties: false, properties: stepProperties },
+      } },
+    },
+  },
+}];
 const reply = define("answer_without_action", "_reply", "Answer the user's question or ask for clarification in Markdown when no phone action is appropriate.", { text: text(6500) });
 export const repairTools = [...deviceTools, reply.tool];
+export const planRepairTools = [...planTools, reply.tool];
 const byName = new Map([...definitions, reply].map(definition => [definition.tool.function.name, definition]));
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): ObjectValue | undefined {
@@ -109,8 +153,36 @@ function validate(value: unknown, property: Property): boolean {
 
 type PartialCall = { name: string; args: string };
 
+function parseAction(definition: ReturnType<typeof define>, args: ObjectValue): ObjectValue | null {
+  const { properties, required } = definition.tool.function.parameters;
+  for (const key of required) if (!Object.hasOwn(args, key)) return null;
+  for (const [key, value] of Object.entries(args)) {
+    if (!Object.hasOwn(properties, key) || !validate(value, properties[key])) return null;
+  }
+  if (definition.kind === "app" && typeof args.target === "string" && args.target.toLowerCase() === "tiktok") {
+    delete args.section;
+  }
+  return { kind: definition.kind, ...args };
+}
+
+function normalizePlan(steps: ObjectValue[]): ObjectValue[] {
+  return steps.map(step => {
+    if (step.kind === "app" && typeof step.target === "string") {
+      const app = step.target.toLowerCase();
+      if (step.section === "shorts" && app === "youtube" || step.section === "reels" && app === "instagram") {
+        return { kind: "screen_task", target: step.target, goal: "Открой раздел " + step.section };
+      }
+    }
+    return step;
+  }).filter((step, index, normalized) => {
+    const next = normalized[index + 1];
+    return !(step.kind === "app" && next?.kind === "screen_task" && typeof step.target === "string" &&
+      typeof next.target === "string" && step.target.trim().toLowerCase() === next.target.trim().toLowerCase());
+  });
+}
+
 export class DeviceDecision {
-  constructor(private readonly repair = false) {}
+  constructor(private readonly repair = false, private readonly plan = false) {}
 
   private calls = new Map<number, PartialCall>();
   private malformed = false;
@@ -123,7 +195,7 @@ export class DeviceDecision {
     for (const [position, raw] of calls.entries()) {
       const call = object(raw);
       const index = call?.index ?? position;
-      if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= 4) {
+      if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= (this.plan ? 1 : 4)) {
         this.tooMany = true;
         continue;
       }
@@ -136,29 +208,38 @@ export class DeviceDecision {
     }
   }
 
-  private parse({ name, args: raw }: PartialCall): ObjectValue | null {
+  private parse({ name, args: raw }: PartialCall): ObjectValue[] | null {
     const definition = byName.get(name);
-    if (!definition || definition.kind === "_reply" && !this.repair) return null;
-    const { properties, required } = definition.tool.function.parameters;
     let args: ObjectValue | undefined;
     try { args = object(JSON.parse(raw)); } catch { return null; }
     if (!args) return null;
-    for (const key of required) if (!Object.hasOwn(args, key)) return null;
-    for (const [key, value] of Object.entries(args)) {
-      if (!Object.hasOwn(properties, key) || !validate(value, properties[key])) return null;
+    if (this.plan && name === planName) {
+      const steps = args.steps;
+      if (Object.keys(args).length !== 1 || !Array.isArray(steps) || steps.length < 1 || steps.length > MAX_PLAN_STEPS) return null;
+      const validated: ObjectValue[] = [];
+      for (const raw of steps) {
+        const step = object(raw);
+        if (!step) return null;
+        const { kind, ...fields } = step;
+        const definition = typeof kind === "string" ? actions.get(kind) : undefined;
+        const result = definition && parseAction(definition, fields);
+        if (!result) return null;
+        validated.push(result);
+      }
+      return normalizePlan(validated);
     }
-    if (definition.kind === "app" && typeof args.target === "string" && args.target.toLowerCase() === "tiktok") {
-      delete args.section;
-    }
-    return { kind: definition.kind, ...args };
+    if (!definition || (definition.kind === "_reply" ? !this.repair : this.plan)) return null;
+    const parsed = parseAction(definition, args);
+    return parsed ? [parsed] : null;
   }
 
   outcome(): ObjectValue | undefined {
     if (this.tooMany) return { tool_error: "multiple_tools" };
     if (this.malformed) return { tool_error: "tool_arguments" };
     if (!this.calls.size) return undefined;
-    const actions = [...this.calls].sort(([a], [b]) => a - b).map(([, call]) => this.parse(call));
-    if (actions.some(action => !action)) return { tool_error: "tool_arguments" };
+    const parsed = [...this.calls].sort(([a], [b]) => a - b).map(([, call]) => this.parse(call));
+    if (parsed.some(result => !result)) return { tool_error: "tool_arguments" };
+    const actions = parsed.flat();
     if (actions[0]?.kind === "_reply" && actions.length === 1) return { delta: actions[0].text };
     if (actions.some(action => action?.kind === "_reply")) return { tool_error: "tool_arguments" };
     return actions.length === 1 ? { tool: actions[0] } : { tools: actions };

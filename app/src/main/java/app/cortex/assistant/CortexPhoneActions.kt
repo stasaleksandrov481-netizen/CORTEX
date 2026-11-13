@@ -28,7 +28,7 @@ internal class CortexPhoneActions(private val context: Context) {
         true
     }.getOrDefault(false)
 
-    fun execute(command: JSONObject): JSONObject {
+    private fun execute(command: JSONObject): JSONObject {
         val kind = command.optString("kind")
         val target = command.optString("target")
         val mode = command.optString("mode")
@@ -36,9 +36,18 @@ internal class CortexPhoneActions(private val context: Context) {
         fun started(intent: Intent) = status(if (launch(intent)) "opened" else "unavailable")
         when (kind) {
             "app" -> {
+                if (normalized(target) in CAMERA_NAMES) return openCamera()
                 val app = resolveApp(target) ?: return status("not_installed")
                 val intent = context.packageManager.getLaunchIntentForPackage(app.pkg) ?: return status("not_installed")
                 return started(intent).put("name", app.name).put("package", app.pkg).put("verified", false)
+            }
+            "close_app" -> {
+                val app = resolveApp(target) ?: return status("not_installed")
+                val service = CortexScreenService.connected ?: return status("needs_screen").put("name", app.name)
+                val current = service.activePackage() ?: return status("unavailable")
+                if (current != app.pkg) return status("already_background").put("name", app.name)
+                val sent = service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                return status(if (sent) "opened" else "unavailable").put("name", app.name).put("package", app.pkg).put("verified", false)
             }
             "play_store" -> {
                 val query = command.optString("query").trim().take(100)
@@ -199,9 +208,34 @@ internal class CortexPhoneActions(private val context: Context) {
     fun resolveApp(target: String): App? {
         val clean = normalized(target)
         val apps = launchableApps()
-        val alias = ALIASES.entries.firstOrNull { clean == it.key || clean in it.value }
-        return apps.firstOrNull { it.pkg == (alias?.key ?: clean) }
-            ?: apps.filter { normalized(it.name) == clean }.singleOrNull()
+        apps.firstOrNull { it.pkg == clean }?.let { return it }
+        val exact = apps.filter { normalized(it.name) == clean }
+        if (exact.size == 1) return exact[0]
+        for ((pkg, names) in ALIASES) {
+            if (clean in names) apps.firstOrNull { it.pkg == pkg }?.let { return it }
+        }
+        return when (clean) {
+            in CAMERA_NAMES -> cameraApp(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
+            else -> null
+        }
+    }
+
+    private fun cameraApp(action: String): App? {
+        val manager = context.packageManager
+        val camera = manager.resolveActivity(Intent(action), 0) ?: return null
+        val pkg = camera.activityInfo.packageName
+        if (pkg == "android") return null
+        return App(pkg, camera.loadLabel(manager).toString())
+    }
+
+    private fun openCamera(): JSONObject {
+        val action = MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA
+        val app = cameraApp(action)
+        val intent = Intent(action)
+        if (app != null) intent.setPackage(app.pkg)
+        val opened = launch(intent)
+        return JSONObject().put("status", if (opened) "opened" else "unavailable")
+            .put("name", app?.name ?: "Камера").put("package", app?.pkg.orEmpty()).put("verified", false)
     }
 
     fun mentionedApp(text: String): App? {
@@ -209,7 +243,7 @@ internal class CortexPhoneActions(private val context: Context) {
         val matches = launchableApps().filter { app ->
             val terms = listOf(normalized(app.name), app.pkg) + ALIASES[app.pkg].orEmpty()
             terms.any { name ->
-                name.length >= 3 && Regex("(?<![\\p{L}\\p{N}])" + Regex.escape(name) +
+                name.length >= 2 && Regex("(?<![\\p{L}\\p{N}])" + Regex.escape(name) +
                     "(?![\\p{L}\\p{N}])").containsMatchIn(clean)
             }
         }
@@ -227,6 +261,7 @@ internal class CortexPhoneActions(private val context: Context) {
                 Build.VERSION.SDK_INT >= 28 && service != null)
             .put("brightness", Settings.System.canWrite(context))
             .put("microphone", context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+            .put("camera", context.checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
             .put("notifications", context.getSystemService(android.app.NotificationManager::class.java).areNotificationsEnabled())
             .put("battery", safeRead("battery")).put("network", safeRead("network"))
     }
@@ -242,10 +277,12 @@ internal class CortexPhoneActions(private val context: Context) {
         }
         val result = runCatching { execute(command) }.getOrElse { JSONObject().put("status", "unavailable") }
         val expected = result.optString("package")
-        if (kind == "app" && result.optString("status") == "opened" && CortexScreenService.connected != null) {
-            awaitState(active, { CortexScreenService.connected?.activePackage() == expected }) { confirmed ->
-                done(result.put("verified", confirmed))
-            }
+        if (kind in setOf("app", "close_app") && result.optString("status") == "opened" &&
+            expected.isNotBlank() && CortexScreenService.connected != null) {
+            awaitState(active, {
+                val foreground = CortexScreenService.connected?.activePackage()
+                foreground != null && if (kind == "close_app") foreground != expected else foreground == expected
+            }) { confirmed -> done(result.put("verified", confirmed)) }
         } else if (kind == "lock_screen" && result.optString("status") == "requested") {
             val keyguard = context.getSystemService(KeyguardManager::class.java)
             awaitState(active, { keyguard.isKeyguardLocked || !context.getSystemService(PowerManager::class.java).isInteractive }) {
@@ -342,15 +379,19 @@ internal class CortexPhoneActions(private val context: Context) {
     }
 
     private companion object {
+        val CAMERA_NAMES = setOf("camera", "камера", "камеру", "фотокамера", "фотокамеру")
+        val TELEGRAM_NAMES = listOf("telegram", "телеграм", "телеграмм", "телеграме", "телега", "телегу", "телеге", "тг")
         val ALIASES = mapOf(
-            "org.telegram.messenger" to listOf("telegram", "телеграм", "телеграмм", "телеграме", "телега", "тг"),
+            "org.telegram.messenger" to TELEGRAM_NAMES,
+            "org.telegram.messenger.web" to TELEGRAM_NAMES,
+            "org.thunderdog.challegram" to listOf("telegram x", "телеграм x"),
             "com.zhiliaoapp.musically" to listOf("tiktok", "тик ток", "тикток", "тиктоке", "тт"),
             "com.instagram.android" to listOf("instagram", "инстаграм", "инстаграме"),
             "com.google.android.youtube" to listOf("youtube", "ютуб", "ютубе"),
             "com.whatsapp" to listOf("whatsapp", "ватсап", "ватсапе"),
             "com.android.chrome" to listOf("chrome", "хром", "хроме"),
-            "com.yandex.browser" to listOf("яндекс браузер", "яндексе", "яндекс", "yandex browser"),
-            "ru.yandex.searchplugin" to listOf("яндекс с алисой"),
+            "com.yandex.browser" to listOf("яндекс браузер", "яндекс браузере", "яндексе", "яндекс", "yandex", "yandex browser"),
+            "ru.yandex.searchplugin" to listOf("яндекс с алисой", "яндексе", "яндекс", "yandex"),
             "com.android.vending" to listOf("google play", "play market", "плей маркет")
         )
     }

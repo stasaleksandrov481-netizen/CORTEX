@@ -1,4 +1,4 @@
-import { type DeviceDecision, deviceTools, repairTools } from "./device.ts";
+import { DeviceDecision, deviceTools, repairTools, planGuide, planTools, planRepairTools } from "./device.ts";
 
 export class Failure extends Error {
   readonly code: string;
@@ -49,11 +49,12 @@ export async function body(request: Request, limit = 770_000): Promise<Record<st
 }
 
 export type ModelProfile = "auto" | "fast" | "deep";
-export function chatInput(input: Record<string, unknown>): { messages: Turn[]; limit: number; device: boolean; repair: boolean; profile?: ModelProfile } {
-  const { messages, style = "balanced", device_tools = false, repair_tools = false, profile } = input;
-  if (Object.keys(input).some(key => !["messages", "style", "device_tools", "repair_tools", "profile"].includes(key)) ||
+export function chatInput(input: Record<string, unknown>): { messages: Turn[]; limit: number; device: boolean; repair: boolean; plan: boolean; profile?: ModelProfile } {
+  const { messages, style = "balanced", device_tools = false, repair_tools = false, action_plan = false, profile } = input;
+  if (Object.keys(input).some(key => !["messages", "style", "device_tools", "repair_tools", "action_plan", "profile"].includes(key)) ||
     profile !== undefined && profile !== "auto" && profile !== "fast" && profile !== "deep" ||
-    typeof device_tools !== "boolean" || typeof repair_tools !== "boolean" || repair_tools && !device_tools || typeof style !== "string" || !Object.hasOwn(LIMITS, style) || !Array.isArray(messages) ||
+    typeof device_tools !== "boolean" || typeof repair_tools !== "boolean" || typeof action_plan !== "boolean" ||
+    (repair_tools || action_plan) && !device_tools || typeof style !== "string" || !Object.hasOwn(LIMITS, style) || !Array.isArray(messages) ||
     messages.length < 1 || messages.length > 29) throw new Failure("invalid", 400);
   let length = 0;
   const turns: Turn[] = messages.map((turn, index) => {
@@ -64,7 +65,7 @@ export function chatInput(input: Record<string, unknown>): { messages: Turn[]; l
     return { role: turn.role, content: turn.content };
   });
   if (length > 51_000 || turns.at(-1)?.role !== "user") throw new Failure("invalid", 400);
-  return { messages: turns, limit: LIMITS[style as keyof typeof LIMITS], device: device_tools, repair: repair_tools, profile };
+  return { messages: turns, limit: LIMITS[style as keyof typeof LIMITS], device: device_tools, repair: repair_tools, plan: action_plan, profile };
 }
 
 function retrySeconds(headers: Headers): number {
@@ -155,10 +156,19 @@ export type ModelResponse = { response: Response; releaseDeadline: () => void };
 
 export async function completion(
   network: Network, key: string, models: string[], messages: Turn[], stream: boolean, limit: number,
-  signal: AbortSignal, device = false, repair = false, firstTokenMs = 18_000, quick = false,
+  signal: AbortSignal, device = false, repair = false, firstTokenMs = 18_000, quick = false, plan = false,
 ): Promise<ModelResponse> {
   if (!key || !models.length || models.some(model => !/^[a-z0-9._-]+\/[a-z0-9._-]+:free$/.test(model))) {
     throw new Failure("unconfigured", 503);
+  }
+  const tools = plan ? (repair ? planRepairTools : planTools) : (repair ? repairTools : deviceTools);
+  if (plan) {
+    const guide = "\n\nWhen the user explicitly asks for device actions, call execute_phone_plan with every step in order. " +
+      "Each step has kind and only the applicable parameters. A question, hypothetical example, or request for instructions should get a text answer.\n" + planGuide;
+    const first = messages[0];
+    messages = first?.role === "system"
+      ? [{ role: "system", content: first.content + guide }, ...messages.slice(1)]
+      : [{ role: "system", content: guide.trim() }, ...messages];
   }
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), firstTokenMs);
@@ -174,8 +184,8 @@ export async function completion(
       },
       body: JSON.stringify({
         ...(models.length === 1 ? { model: models[0] } : { models }), messages, stream,
-        max_tokens: limit, temperature: .42, top_p: .9,
-        ...(device ? { tools: repair ? repairTools : deviceTools, tool_choice: repair ? "required" : "auto" } : {}),
+        max_tokens: plan ? Math.max(limit, 1600) : limit, temperature: plan ? .18 : .42, top_p: .9,
+        ...(device ? { tools, tool_choice: repair ? "required" : "auto" } : {}),
         provider: {
           max_price: { prompt: 0, completion: 0 },
           ...(device ? { require_parameters: true } : {}), ...(quick ? { sort: "latency" } : {}),
@@ -205,8 +215,8 @@ export async function verifyCompletion(model: ModelResponse): Promise<void> {
 
 type RelayControl = { reader?: ReadableStreamDefaultReader<Uint8Array> };
 
-async function* events(response: Response, control: RelayControl, device: boolean, repair: boolean): AsyncGenerator<Record<string, unknown>> {
-  const decision = device ? new DeviceDecision(repair) : undefined;
+async function* events(response: Response, control: RelayControl, device: boolean, repair: boolean, plan: boolean): AsyncGenerator<Record<string, unknown>> {
+  const decision = device ? new DeviceDecision(repair, plan) : undefined;
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     if (!response.headers.get("content-type")?.includes("text/event-stream")) {
@@ -275,7 +285,7 @@ async function* events(response: Response, control: RelayControl, device: boolea
 
 async function* stream(
   initial: ModelResponse, control: RelayControl, device: boolean, repair: boolean,
-  fallback: (failure: Failure) => Promise<ModelResponse | undefined>, initialFallback: boolean,
+  fallback: (failure: Failure) => Promise<ModelResponse | undefined>, initialFallback: boolean, plan: boolean,
 ) {
   let current = initial;
   if (initialFallback) yield { status: "fallback" };
@@ -283,7 +293,7 @@ async function* stream(
     let visible = false;
     let retry: Failure | undefined;
     try {
-      for await (const event of events(current.response, control, device, repair)) {
+      for await (const event of events(current.response, control, device, repair, plan)) {
         if (!visible && typeof event.error === "string" &&
           (retryableModelError(event.error) || event.error === "provider_quota" || event.error === "provider_quota_daily")) {
           retry = new Failure(event.error, 502, Number(event.retry_after) || 0);
@@ -315,23 +325,48 @@ async function* stream(
 
 export function relay(
   initial: ModelResponse, fallback: (failure: Failure) => Promise<ModelResponse | undefined>,
-  device = false, repair = false, initialFallback = false, abort?: () => void,
+  device = false, repair = false, initialFallback = false, abort?: () => void, plan = false,
 ): ReadableStream<Uint8Array> {
   const upstream: RelayControl = {};
-  const source = stream(initial, upstream, device, repair, fallback, initialFallback);
+  const source = stream(initial, upstream, device, repair, fallback, initialFallback, plan);
   const encoder = new TextEncoder();
+  let closed = false;
+
+  async function closeUpstream() {
+    abort?.();
+    initial.releaseDeadline();
+    await upstream.reader?.cancel().catch(() => {});
+    await source.return(undefined).catch(() => {});
+    if (!initial.response.bodyUsed) await initial.response.body?.cancel().catch(() => {});
+  }
+
+  function finish(controller: ReadableStreamDefaultController<Uint8Array>, event: string) {
+    closed = true;
+    controller.enqueue(encoder.encode("data: " + event + "\n\n"));
+    controller.close();
+    void closeUpstream().catch(() => {});
+  }
+
   return new ReadableStream({
     async pull(controller) {
-      const next = await source.next();
-      if (next.done) controller.close();
-      else controller.enqueue(encoder.encode("data: " + JSON.stringify(next.value) + "\n\n"));
+      try {
+        const next = await source.next();
+        if (closed) return;
+        if (next.done) throw new Failure("provider", 502);
+        const event = next.value;
+        if (event.done === true) finish(controller, "[DONE]");
+        else if (typeof event.error === "string") finish(controller, JSON.stringify(event));
+        else controller.enqueue(encoder.encode("data: " + JSON.stringify(event) + "\n\n"));
+      } catch (error) {
+        if (closed) return;
+        console.warn("CORTEX chat stream interrupted:", error instanceof Error ? error.name : "UnknownError");
+        finish(controller, JSON.stringify(failureBody(connectionFailure(error))));
+      }
     },
     async cancel() {
-      abort?.();
-      initial.releaseDeadline();
-      await upstream.reader?.cancel().catch(() => {});
-      await source.return(undefined);
-      if (!initial.response.bodyUsed) await initial.response.body?.cancel().catch(() => {});
+      if (closed) return;
+      closed = true;
+      await closeUpstream();
     },
   });
 }

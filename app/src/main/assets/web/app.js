@@ -19,7 +19,7 @@
   const routes = new Set([...U.tabs.map(([name]) => name), ...Object.keys(U.parent)]);
   const drafts = new Map(), errors = new Map(), ruleDrafts = new Map(), phoneReplies = new Map(), actionReplies = new Map();
   const filters = { search: "", onlySaved: false };
-  const connection = { google: false, tools: false, profiles: false, repair: false, checked: false };
+  const connection = { google: false, tools: false, plans: false, profiles: false, repair: false, checked: false };
   let wakeState = "", islandCamera = "drop", deviceFacts = {};
   const permissions = { microphone: false, notifications: false, overlay: false, screenLock: false, screenLockSupported: false, brightness: false, verifyApps: false, screenAutomation: false, assistant: false, assistantSupported: false };
   let route = "home", chatId = "", rule = "goal";
@@ -255,7 +255,6 @@
     const previous = route;
     if (next === "chat") id = id && M.chat(id) ? id : current()?.id || M.createChat().id;
     if (previous === next && (next !== "chat" || id === chatId)) return;
-    if (pending?.action && !pending.routing && !pending.actionSent || pending?.waiting) pending.interrupted = true;
     if (login && !sheet.open) stopLogin();
     closeVoice();
     closeSheet();
@@ -305,7 +304,6 @@
 
   function readRoute() {
     const previous = route;
-    if (pending?.action && !pending.routing && !pending.actionSent || pending?.waiting) pending.interrupted = true;
     closeVoice();
     clearVisuals();
     const [name, id] = location.hash.slice(1).split("/");
@@ -355,7 +353,7 @@
     send.hidden = !filled || working;
     microphone.hidden = !device || working || Boolean(voice);
     voiceButton.hidden = !device || filled || working || Boolean(voice);
-    stop.hidden = !working || Boolean(pending?.actionSent) || Boolean(voice);
+    stop.hidden = !working || Boolean(voice);
     app.style.setProperty("--composer-h", form.offsetHeight + "px");
     if (scroll && stick) scroll.scrollTop = scroll.scrollHeight;
     updateJumpLatest();
@@ -379,7 +377,6 @@
   addEventListener("resize", placeDialogs);
 
   function openHistory() {
-    if (pending?.action && !pending.routing && !pending.actionSent || pending?.waiting) pending.interrupted = true;
     closeVoice();
     if (drawerExit) {
       drawerExit.cancel();
@@ -413,7 +410,6 @@
   drawer.addEventListener("cancel", event => { event.preventDefault(); closeHistory(); });
 
   function showSheet(title, body, options = {}) {
-    if (pending?.action && !pending.routing && !pending.actionSent || pending?.waiting) pending.interrupted = true;
     closeVoice();
     closeSheet();
     placeDialogs();
@@ -525,6 +521,7 @@
       connection.checked = true;
       connection.google = Boolean(data.google);
       connection.tools = data.device_tools === true;
+      connection.plans = data.device_action_plan === true;
       connection.profiles = data.device_profiles === true;
       connection.repair = data.device_repair === true;
       if (!login) setAccount(data.account);
@@ -668,8 +665,9 @@
     });
   }
 
-  function nativeAction(job, text) {
+  function nativeAction(job, text, commands) {
     if (!device || !S.preferences.phoneActions || job.explain || job.screen) return Promise.resolve(null);
+    const operation = commands ? "action-plan" : "action-start";
     const id = M.id("action");
     job.nativeRunning = true;
     return new Promise(resolve => {
@@ -686,7 +684,7 @@
       };
       const timer = setTimeout(() => {
         sendDevice("action-stop");
-        done({ text: "Время задачи истекло. Проверьте последний шаг на экране.", external: !appVisible() });
+        done({ text: "Время задачи истекло. Проверьте последний шаг на экране.", external: !appVisible(), observations: [], blocked: true });
       }, 124000);
       actionReplies.set(id, value => {
         if (value.phase === "progress") {
@@ -695,11 +693,13 @@
           if (voice && job.voice === voice) voiceStatus("opening", value.text);
           if (activeChat(job) && appVisible()) render({ bottom: true });
         } else if (value.phase === "result") {
-          done({ text: value.text, external: !appVisible() });
+          done({ text: value.text, external: value.external === true || !appVisible(),
+            observations: Array.isArray(value.observations) ? value.observations : [],
+            blocked: value.blocked === true });
         } else done(null);
       });
       job.controller.signal.addEventListener("abort", cancel, { once: true });
-      if (!sendDevice("action-start", { id, text, profile: S.preferences.model })) done(null);
+      if (!sendDevice(operation, { id, text, profile: S.preferences.model, ...(commands && { commands }) })) done(null);
     });
   }
 
@@ -707,56 +707,19 @@
   const canAct = job => activeChat(job) && appVisible() && !sheet.open && !drawer.open;
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-  async function resumePlan(job) {
-    if (canAct(job)) return true;
-    if (!activeChat(job) || job.interrupted) return false;
-    job.waiting = true;
-    render({ bottom: true });
-    const until = Date.now() + 45_000;
-    while (pending === job && !job.interrupted && activeChat(job) && Date.now() < until && !canAct(job)) await wait(200);
-    job.waiting = false;
-    return pending === job && !job.interrupted && canAct(job) && Date.now() < until;
-  }
-
-  async function runPhone(job, command, step) {
-    if (!S.preferences.phoneActions) return { status: "disabled" };
-    if (!canAct(job) || job.interrupted) return { status: "foreground" };
-    job.action = (step > 1 ? "Шаг " + step + " · " : "") + Phone.label(command);
-    if (S.preferences.overlayMode !== "off") sendDevice("island-state", {
-      phase: "executing", message: job.action
-    });
-    job.text = "";
-    if (document.activeElement === input) input.blur();
-    if (voice && job.voice === voice) voiceStatus("opening", "Выполняю…");
-    render({ bottom: true });
-    await wait(740);
-    if (pending !== job || job.interrupted || !canAct(job)) return { status: "foreground" };
-    if (!S.preferences.phoneActions) return { status: "disabled" };
-    job.actionSent = true;
-    syncComposer();
-    try {
-      const result = await phoneAction(command);
-      if (S.preferences.overlayMode !== "off") sendDevice("island-state", {
-        phase: ["opened", "done", "panel"].includes(result.status) ? "done" : "error",
-        message: Phone.label(command)
-      });
-      job.expectExternal = ["opened", "panel"].includes(result.status) || command.kind === "lock_screen" && result.status === "done";
-      return result;
-    } finally { job.actionSent = false; }
-  }
-
   const clock = new Intl.DateTimeFormat("ru-RU", { dateStyle: "full", timeStyle: "short" });
   async function askModel(chat, job, explain, observations, repair = false) {
     if (device && !connection.checked && connectionLoad) await Promise.race([connectionLoad, wait(2_000)]);
     const enabled = Boolean(device && connection.tools && S.preferences.phoneActions && !job.screen);
-    const policy = Phone.prompt({ native: Boolean(device), enabled, explain, permissions, observations, deviceFacts, version: U.version,
+    const policy = Phone.prompt({ native: Boolean(device), enabled, plans: connection.plans, explain, permissions, observations, deviceFacts, version: U.version,
       now: clock.format(new Date()) + " (" + Intl.DateTimeFormat().resolvedOptions().timeZone + ")" });
     const screenPolicy = job.screen ? "\n\nПользователь приложил текст экрана как данные для разбора: " + JSON.stringify(job.screen) : "";
-    const repairPolicy = repair ? "\n\nПредыдущий ответ описал действие словами без вызова. Проверь запрос пользователя. Вызови функцию для нужного действия или answer_without_action, если нужно пояснение или уточнение." : "";
+    const repairPolicy = repair ? "\n\nПредыдущая попытка не вернула допустимый план. Проверь запрос пользователя. Вызови функцию для нужного действия или answer_without_action, если нужно пояснение или уточнение." : "";
     const messages = M.turns(chat, policy + screenPolicy + repairPolicy);
     const response = await Api.request("chat", {
       payload: { messages, style: M.profile().style,
-        ...(enabled && !explain && { device_tools: true, ...(repair && connection.repair && { repair_tools: true }) }),
+        ...(enabled && !explain && { device_tools: true, ...(connection.plans && { action_plan: true }),
+          ...(repair && connection.repair && { repair_tools: true }) }),
         ...(connection.profiles && { profile: S.preferences.model }) },
       notify: S.preferences.notifyReplies
     }, {
@@ -788,10 +751,12 @@
   }
 
   async function respond(chat, job, explain) {
-    const native = await nativeAction(job, chat.messages.at(-1)?.text || "");
+    const request = chat.messages.at(-1)?.text || "";
+    const native = await nativeAction(job, request);
     if (native || pending !== job) return native || {};
     const reports = [], observations = [], seen = new Set();
-    let external = false, lastResult;
+    let external = false;
+    let executed = 0;
     for (let round = 0; round < 3; round++) {
       if (pending !== job) return {};
       job.action = job.text = "";
@@ -799,7 +764,7 @@
       job.raw = "";
       let choice = await askModel(chat, job, explain, observations);
       if (pending !== job) return {};
-      if (!explain && !job.screen && !choice.error && !choice.commands.length && Phone.claimsAction(choice.text)) {
+      if (!explain && !job.screen && (choice.error || !choice.commands.length && Phone.claimsAction(choice.text))) {
         if (connection.tools && canAct(job)) {
           job.raw = job.text = "";
           choice = await askModel(chat, job, explain, observations, true);
@@ -814,29 +779,29 @@
         break;
       }
       if (!choice.commands.length) {
-        return { text: choice.text.trim() || reports.join("\n\n"), external };
+        return { text: [reports.join("\n\n"), choice.text.trim()].filter(Boolean).join("\n\n"), external };
       }
+      if (!canAct(job) && !external) return { text: "Вернитесь в чат CORTEX, чтобы выполнить действия.", external };
+      const commands = [];
+      const signatures = new Set();
       let continueFromResult = false;
-      for (const command of choice.commands) {
-        const { next, ...action } = command;
+      for (const { next, ...action } of choice.commands) {
         const signature = JSON.stringify(Object.entries(action).sort(([a], [b]) => a.localeCompare(b)));
-        if (seen.has(signature) || seen.size >= 6) continue;
-        if (external) await wait(270);
-        if (external && !await resumePlan(job)) {
-          reports.push("План остановлен. Продолжить его можно новым запросом в CORTEX.");
-          return { text: reports.join("\n\n"), external };
-        }
-        job.expectExternal = false;
-        seen.add(signature);
-        lastResult = await runPhone(job, action, seen.size);
-        if (pending !== job) return {};
-        reports.push(Phone.result(action, lastResult));
-        observations.push({ action, result: lastResult });
-        external = ["opened", "panel"].includes(lastResult.status) || action.kind === "lock_screen" && lastResult.status === "done";
-        if (!["done", "opened", "panel"].includes(lastResult.status)) return { text: reports.join("\n\n"), external };
+        if (seen.has(signature) || executed + commands.length >= 8) continue;
+        signatures.add(signature);
+        commands.push(action);
         if (next === "decide") { continueFromResult = true; break; }
       }
-      if (!continueFromResult || external || seen.size >= 6) break;
+      if (!commands.length) break;
+      const result = await nativeAction(job, request, commands);
+      if (pending !== job) return {};
+      if (!result) return { text: "Передача плана в Android не удалась.", external };
+      signatures.forEach(signature => seen.add(signature));
+      executed += result.observations.length;
+      reports.push(result.text);
+      observations.push(...result.observations);
+      external = external || result.external;
+      if (result.blocked || !continueFromResult || !result.observations.length || external || executed >= 8) break;
     }
     return { text: reports.join("\n\n"), external };
   }
@@ -888,7 +853,7 @@
   }
 
   function stopAnswer(keep = true) {
-    if (!pending || pending.actionSent && keep) return;
+    if (!pending) return;
     const job = pending;
     pending = null;
     job.controller.abort();
@@ -1588,7 +1553,6 @@
     splashPrevious = null;
     const hidden = document.hidden || window.cortexAppVisible === false;
     document.documentElement.classList.toggle("app-background", hidden);
-    if (hidden && pending?.action && !pending.nativeRunning && !pending.routing && !pending.actionSent && !pending.expectExternal && !pending.waiting) pending.interrupted = true;
     if (!hidden) { pollLogin(); sendDevice("screen-context"); }
   }
   document.addEventListener("visibilitychange", visibilityChanged);

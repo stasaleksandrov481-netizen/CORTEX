@@ -83,7 +83,7 @@ class CortexWakeService : Service() {
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 4)
         putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 690L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1_250L)
         if (Build.VERSION.SDK_INT >= 33) {
             putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, arrayListOf("Кортекс", "Эй Кортекс", "Кортэкс"))
         }
@@ -203,7 +203,7 @@ class CortexWakeService : Service() {
             streamed = true
             failures = 0
             streamRestarts = 0
-            result(hypotheses(segmentResults))
+            result(hypotheses(segmentResults), segmented = true)
         }
 
         override fun onEndOfSegmentedSession() {
@@ -257,9 +257,9 @@ class CortexWakeService : Service() {
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
     }
 
-    private fun result(options: List<String>) {
+    private fun result(options: List<String>, segmented: Boolean = false) {
         val now = SystemClock.elapsedRealtime()
-        turn.result(options, now)
+        turn.result(options, now, segmented)
         ui.removeCallbacks(expire)
         val remaining = turn.timeLeft(now)
         if (remaining > 0) ui.postDelayed(expire, remaining)

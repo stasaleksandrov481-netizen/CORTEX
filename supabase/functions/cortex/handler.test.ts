@@ -9,7 +9,7 @@ const accountId = "98d87a12-240b-4a57-95e0-7bc0bbbd0f42";
 const ticketId = "2f343286-09bb-4e8e-9aa3-21ecc664219b";
 const replyId = "1f8188b2-9176-4be1-b0cf-8d9ef890eaa0";
 
-function fixture(maintenance = false) {
+function fixture(maintenance = false, streamedReply?: () => Response) {
   let ticket: Record<string, unknown> | null = null;
   const models: string[] = [];
   const requests: string[] = [];
@@ -35,6 +35,7 @@ function fixture(maintenance = false) {
         return Response.json({ error: { metadata: { provider_name: "upstream" } } }, { status: 429 });
       }
       if (body.stream) {
+        if (streamedReply) return streamedReply();
         return new Response('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n',
           { headers: { "content-type": "text/event-stream" } });
       }
@@ -127,4 +128,106 @@ test("an older APK gets a verified HTTPS update link", async () => {
   const gate = await control.gate(new Request("https://example.test", { headers: { "x-cortex-version-code": "92" } }));
   assert.equal(gate.mode, "update");
   assert.match(gate.update_url!, /^https:\/\//);
+});
+
+function chatPayload(text: string, tools = true) {
+  return { messages: [{ role: "user", content: text }], style: "brief", device_tools: tools };
+}
+
+function sseReply(frames: Array<object | "[DONE]">, keepOpen = false): Response {
+  const encoder = new TextEncoder();
+  return new Response(new ReadableStream({
+    start(controller) {
+      for (const frame of frames) {
+        controller.enqueue(encoder.encode("data: " + (typeof frame === "string" ? frame : JSON.stringify(frame)) + "\n\n"));
+      }
+      if (!keepOpen) controller.close();
+    },
+    cancel() { if (keepOpen) return new Promise<void>(() => {}); },
+  }), { headers: { "content-type": "text/event-stream" } });
+}
+
+test("ordinary chat completes with device tools enabled", async () => {
+  const { call } = fixture();
+  const response = await call("chat", chatPayload("Привет"));
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /data: {"delta":"OK"}\n\ndata: \[DONE\]\n\n$/);
+});
+
+test("streams a validated Android tool call and closes before waiting for upstream cleanup", { timeout: 2000 }, async () => {
+  const { call } = fixture(false, () => sseReply([
+    { choices: [{ delta: { tool_calls: [{ index: 0, type: "function", function: { name: "inspect_phone", arguments: '{"target":' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"battery"}' } }] }, finish_reason: "tool_calls" }] },
+    "[DONE]",
+  ], true));
+  const response = await call("chat", chatPayload("Проверь заряд телефона"));
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /data: {"tool":{"kind":"read_device","target":"battery"}}\n\ndata: \[DONE\]\n\n$/);
+});
+
+test("preserves a mixed Android plan in provider order", async () => {
+  const steps = [
+    { kind: "torch", mode: "on" },
+    { kind: "screen_task", target: "Any installed app", goal: "Open the requested page" },
+    { kind: "torch", mode: "off" },
+    { kind: "close_app", target: "Any installed app" },
+    { kind: "capture_photo", lens: "front" },
+    { kind: "lock_screen" },
+  ];
+  const args = JSON.stringify({ steps });
+  const { call } = fixture(false, () => sseReply([
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "execute_phone_plan", arguments: args.slice(0, 37) } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(37) } }] } }] },
+    "[DONE]",
+  ]));
+  const response = await call("chat", { ...chatPayload("Выполни цепочку действий"), action_plan: true });
+  const data = (await response.text()).split("\n").find(line => line.startsWith('data: {"tools":'));
+  assert.ok(data);
+  assert.deepEqual(JSON.parse(data.slice(6)).tools, steps);
+});
+
+test("older clients cannot receive a screen-task tool", async () => {
+  const { call } = fixture(false, () => sseReply([
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "execute_phone_plan", arguments: '{"steps":[{"kind":"screen_task","target":"Example","goal":"Open the list"}]}' } }] } }] },
+    "[DONE]",
+  ]));
+  const response = await call("chat", chatPayload("Open the list"));
+  assert.match(await response.text(), /data: {"tool_error":"tool_arguments"}/);
+});
+
+test("screen task includes opening its app and preserves following actions", async () => {
+  const steps = [
+    { kind: "app", target: "Browser" }, { kind: "screen_task", target: "browser", goal: "Find books" },
+    { kind: "app", target: "YouTube", section: "shorts" }, { kind: "lock_screen" },
+  ];
+  const { call } = fixture(false, () => sseReply([
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "execute_phone_plan", arguments: JSON.stringify({ steps }) } }] } }] },
+    "[DONE]",
+  ]));
+  const response = await call("chat", { ...chatPayload("Выполни задачу"), action_plan: true });
+  const data = (await response.text()).split("\n").find(line => line.startsWith('data: {"tools":'));
+  assert.ok(data);
+  assert.deepEqual(JSON.parse(data.slice(6)).tools, [steps[1], { kind: "screen_task", target: "YouTube", goal: "Открой раздел shorts" }, steps[3]]);
+});
+
+test("rejects a whole plan with an invalid later step", async () => {
+  const { call } = fixture(false, () => sseReply([
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "execute_phone_plan", arguments: '{"steps":[{"kind":"torch","mode":"on"},{"kind":"screen_task","target":"Example"}]}' } }] } }] },
+    "[DONE]",
+  ]));
+  const response = await call("chat", { ...chatPayload("Выполни задачу"), action_plan: true });
+  const data = await response.text();
+  assert.match(data, /data: {"tool_error":"tool_arguments"}/);
+  assert.doesNotMatch(data, /data: {"tools?":/);
+});
+
+test("delivers an explicit error after interrupted output and ends the stream", { timeout: 2000 }, async () => {
+  const { call } = fixture(false, () => sseReply([
+    { choices: [{ delta: { content: "Начало ответа" } }] },
+    { error: { code: 502 } },
+  ], true));
+  const response = await call("chat", chatPayload("Привет", false));
+  const stream = await response.text();
+  assert.match(stream, /data: {"delta":"Начало ответа"}/);
+  assert.match(stream, /data: {"error":"provider"}\n\n$/);
 });
