@@ -5,7 +5,7 @@ const Cortex = (() => {
   const instructionFields = [
     { id: "goal", label: "Задача", value: "Помогай разбираться в задачах, находить понятные объяснения и планировать действия." },
     { id: "reply", label: "Ответы", value: "Начинай с сути. Для сложной задачи предложи короткий план и уточни важные детали." },
-    { id: "actions", label: "Действия", value: "Выбирай инструменты Android для запрошенных действий." },
+    { id: "actions", label: "Действия", value: "Действуй на экране только по запросу пользователя." },
     { id: "confirm", label: "Уточнения", value: "Если запрос неоднозначен, задай один вопрос, который сильнее всего меняет ответ." }
   ];
   const styles = { brief: "Кратко", balanced: "Сбалансированно", deep: "Подробно" };
@@ -53,7 +53,8 @@ const Cortex = (() => {
       updated: string(item.updated, 40) || new Date().toISOString(),
       title: string(item.title, 72) || "Новый чат",
       messages: array(item.messages).filter(message => ["user", "assistant"].includes(message?.role) && message.text)
-        .map(({role, text, local}) => ({ role, text: string(text, 20000), ...(local === true && { local: true }) }))
+        .map(({role, text, local, resumable}) => ({ role, text: string(text, 20000),
+          ...(local === true && { local: true }), ...(resumable === true && { resumable: true }) }))
     };
   }
 

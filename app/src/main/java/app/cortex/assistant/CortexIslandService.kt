@@ -50,10 +50,10 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     private var moving = false
     private var busy = false
     private var actionBusy = false
-    private var invokedFrom: String? = null
-    private val actionStatus: (String, String) -> Unit = { state, text ->
+    private var wakeExpanded = false
+    private val actionStatus: (String, String) -> Unit = { state, _ ->
         actionBusy = state == "executing"
-        if (!busy) updateStatus(state, text)
+        if (!busy && (state == "executing" || state == "done" || state == "error")) render()
     }
     private val visibilityChanged: () -> Unit = { render() }
 
@@ -112,9 +112,15 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
                 intent.getStringExtra(EXTRA_PHASE) ?: "idle", intent.getStringExtra(EXTRA_MESSAGE).orEmpty().take(64)
             )
             ACTION_WAKE -> if (!busy && !actionBusy) {
+                wakeExpanded = !opening
                 updateStatus("listening", "Слушаю команду…")
+                setExpanded(true)
             }
-            ACTION_WAKE_CLOSED -> if (phase == "listening" && !busy) updateStatus("idle", "")
+            ACTION_WAKE_CLOSED -> if (phase == "listening" && !busy) {
+                if (wakeExpanded) setExpanded(false)
+                wakeExpanded = false
+                updateStatus("idle", "")
+            }
             ACTION_SUBMIT -> {
                 val text = intent.getStringExtra(EXTRA_MESSAGE).orEmpty()
                 if (text.isNotBlank() && canShow()) {
@@ -139,9 +145,9 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         if (!busy) {
             val delay = when (state) {
                 "done", "error" -> if (reply.isNotBlank()) 12_000L else 2600L
-                "listening" -> 9_000L
+                "listening" -> 0L
                 "understood" -> 12_000L
-                "executing" -> 45_000L
+                "executing" -> 0L
                 else -> 0L
             }
             if (delay > 0) ui.postDelayed(returnToIdle, delay)
@@ -150,7 +156,8 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     }
 
     private fun render() {
-        if (CortexRuntime.appVisible || !canShow() || (mode == "wake" && phase == "idle" && !opening && !moving)) {
+        if (CortexRuntime.appVisible || !canShow() || (actionBusy && !opening && !moving) ||
+            (mode == "wake" && phase == "idle" && !opening && !moving)) {
             removeIsland()
             return
         }
@@ -160,7 +167,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         val visible = island ?: createIsland(nextScreen) ?: return
         val label = when (phase) {
             "listening" -> message.ifBlank { "Слушаю…" }
-            "executing" -> message.replaceFirst(STEP_LABEL, "$1/$2 · ").ifBlank { "Думаю…" }
+            "executing" -> message.ifBlank { "Думаю…" }
             "done" -> if (reply.isNotBlank()) "Ответ готов" else "Готово"
             "error" -> if (reply.isNotBlank()) "Открыть ответ" else message.ifBlank { "Не удалось выполнить" }
             "understood" -> message
@@ -200,7 +207,6 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
             return
         }
         ui.removeCallbacks(settleLayout)
-        if (open) CortexScreenService.connected?.activePackage()?.takeIf { CortexScreenService.supportsPackage(it) }?.let { invokedFrom = it }
         opening = open
         moving = true
         if (!open) view.conversation.hideKeyboard()
@@ -209,7 +215,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
             moving = false
             placeIsland(view)
             if (open && focus) view.conversation.focusEditor()
-            if (!open && phase == "idle") render()
+            if (!open) render()
         }
     }
 
@@ -232,28 +238,30 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
             ui.removeCallbacks(settleLayout)
             ui.postDelayed(settleLayout, LiquidIslandView.GEOMETRY_MS)
         }
-        view.place(placement, box, transition)
         val flags = windowFlags(if (moving) opening || view.hasWindowFocus() else opening)
-        if (box == previous && flags == lp.flags) return
+        if (box == previous && flags == lp.flags) {
+            view.place(placement, box, transition)
+            return
+        }
         lp.width = box.width().coerceAtLeast(1)
         lp.height = box.height().coerceAtLeast(1)
         lp.x = box.left - viewport.bounds.left
         lp.y = box.top - viewport.bounds.top
         lp.flags = flags
         if (update && view.isAttachedToWindow) runCatching { manager.updateViewLayout(view, lp) }
+        view.place(placement, box, transition)
     }
 
     private fun submit(raw: String, fromVoice: Boolean = false) {
         val text = raw.trim().take(2400)
         if (busy || actionBusy || text.isEmpty()) return
-        if (fromVoice) invokedFrom = CortexScreenService.connected?.activePackage()
         if (fromVoice) island?.conversation?.hideKeyboard()
         busy = true
         reply = ""
         updateStatus("executing", "Думаю…")
         setExpanded(true)
         val streamed = StringBuilder()
-        assistant.send(text, preferences.getString("profile", "auto") ?: "auto", invokedFrom,
+        assistant.send(text, preferences.getString("profile", "auto") ?: "auto",
             beforeScreen = { setExpanded(false) },
             toolsAllowed = { preferences.getBoolean("phoneActions", true) && Settings.canDrawOverlays(this) },
             progress = { updateStatus("executing", it) },
@@ -390,6 +398,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         window = null
         opening = false
         moving = false
+        wakeExpanded = false
         legacyProbe?.let { runCatching { manager.removeViewImmediate(it) } }
         legacyProbe = null
     }
@@ -431,7 +440,6 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         const val EXTRA_PHASE = "phase"
         const val EXTRA_MESSAGE = "message"
         private val STOP_COMMAND = Regex("(?iu)^(?:стоп|остановись|отмена)[.!?]*$")
-        private val STEP_LABEL = Regex("^Шаг (\\d+) из (\\d+) · ")
         private const val CHANNEL = "cortex-island"
         private const val NOTIFICATION = 2810
 

@@ -3,7 +3,7 @@
 const CortexUI = (() => {
   const M = Cortex;
   const icon = CortexIcons;
-  const version = "1.0.1";
+  const version = "1.0.3";
   const tabs = [
     ["chat", "Чат", "message"], ["phone-tools", "Вызов", "bolt"], ["home", "Кортекс", ""],
     ["notes", "Заметки", "note"], ["profile", "Профиль", "user"]
@@ -114,6 +114,7 @@ const CortexUI = (() => {
       ? `<article class="message user${ctx.messageEnter && index === item.messages.length - 1 ? " new-turn" : ""}" aria-label="Вы">${esc(message.text)}</article>`
       : `<article class="message assistant${ctx.messageEnter && index === item.messages.length - 1 ? " new-response" : ""}" aria-label="Ответ CORTEX">
         <div class="message-body markdown">${CortexMarkdown.render(message.text)}</div>
+        ${message.resumable && index === item.messages.length - 1 ? button("Продолжить", "", "resume-visual", "", "outline") : ""}
         <div class="message-actions">${iconButton("copy", "Копировать ответ", "copy", index)}
           ${ctx.native ? iconButton("speaker", "Прочитать ответ вслух", "speak", index) : ""}</div></article>`).join("");
     const pending = ctx.pending ? `<article class="message assistant pending" aria-label="Ответ CORTEX">
@@ -262,17 +263,18 @@ const CortexUI = (() => {
         </button>`).join("")}
         </section>
         ${group(switchRow("Не показывать в горизонтальных приложениях", "Например, во время игр и просмотра видео", p.hideLandscape, "hideLandscape") +
+          switchRow("Визуальное управление", "Запускать задачи Android из чата и островка", p.phoneActions, "phoneActions") +
           voiceRow)}
         ${group(tile("Разрешения и доступы", "Покажем назначение каждого разрешения", "shield", "go", "permissions") +
+          tile("Управление экраном", "Примеры команд и остановка задач", "bolt", "go", "tool-list") +
           tile("Настроить заново", "Повторить пошаговую настройку", "sliders", "open-setup"))}
         <p class="quiet-copy">Островок рисуется поверх приложений и требует разрешения. Фоновый микрофон включается только по вашему переключателю.</p>
       </div>`;
   }
   function toolList() {
-    return detail("Действия Android", CortexPhone.operationCount + " вариантов · доступность зависит от устройства",
-      `<section class="panel faq">${CortexPhone.sections.map(item => `<details>
-        <summary>${esc(item.name)} <small>${item.count}</small>${icon("chevron", 15)}</summary>
-        <p>${esc(item.items.join(" · "))}</p></details>`).join("")}</section>`);
+    return detail("Управление экраном", "Доступность зависит от Android и открытого приложения",
+      '<section class="panel stack"><p>Назовите цель или путь по экрану. Например, «Открой Настройки → Дисплей».</p>' +
+      '<p>Для действий с отправкой или удалением CORTEX запросит подтверждение. Защищённые экраны требуют ручного ввода.</p></section>');
   }
   function guide() {
     return detail("Как пользоваться", "Вы управляете — CORTEX помогает", `<section class="guide-steps">
@@ -366,8 +368,6 @@ const CortexUI = (() => {
       ${item("bell", "Уведомления", "Статус задач, кнопка остановки и новые ответы поддержки.", a.notifications, "notification-permission")}
       ${item("check", "Управление экраном", "CORTEX читает элементы выбранного приложения по вашему запросу. Передача подписей модели требует отдельного согласия.", a.screenAutomation, "verification-permission")}
       ${a.assistantSupported ? item("focus", "Цифровой помощник", "Разрешает системный вызов помощника и передачу текста экрана после вашего действия.", a.assistant, "assistant-permission") : ""}
-      ${item("shield", "Блокировка экрана", "Нужна только для команды погасить или заблокировать экран.", a.screenLock, "lock-permission")}
-      ${item("sliders", "Яркость", "Для изменения яркости экрана по запросу.", a.brightness, "brightness-permission")}
       </section>
       <p class="quiet-copy">Некоторые разрешения Android показывает в отдельных системных меню. Нажатие «Настроить» не означает, что доступ уже выдан.</p>
       <div class="actions">${button("Журнал действий", "history", "action-history", "", "outline")}
@@ -395,11 +395,12 @@ const CortexUI = (() => {
     </section>` + group(tile("Конфиденциальность", "Какие данные используются", "shield", "go", "privacy") +
       tile("Связь с разработчиком", "Через поддержку CORTEX", "help", "go", "support")));
   }
-  function privacy() {
+  function privacy(ctx) {
     return detail("Конфиденциальность", "Данные, необходимые для работы", `<section class="panel stack prose">
       <h2>Профиль</h2><p>Для входа CORTEX получает имя, email и фото профиля Google. Имя и фото сохраняются на устройстве для отображения профиля.</p>
       <h2>Сообщения</h2><p>Сохранённые чаты и заметки остаются на устройстве. При отправке CORTEX передаёт серверу запрос и контекст, выбранный настройками памяти. Сервер обращается к OpenRouter.</p>
-      <h2>Голос и команды</h2><p>Речь распознаёт служба Android. В голосовом разговоре распознанный текст отправляется как сообщение. ИИ выбирает инструменты по смыслу запроса. Android выполняет действие и передаёт результат. Текст экрана отправляется модели только когда вы приложите его к сообщению.</p>
+      <h2>Голос и команды</h2><p>Речь распознаёт служба Android. В голосовом разговоре распознанный текст отправляется как сообщение. CORTEX читает элементы и распознаёт текст на телефоне. При вашем согласии для сложной задачи сервер и OpenRouter могут получить краткое описание экрана. Снимки экрана остаются на телефоне.</p>
+      ${window.CortexDevice ? button(ctx.connection.visualPrivacy ? "Отключить передачу текста экрана ИИ" : "Разрешить передачу текста экрана ИИ", "shield", "visual-privacy", "", "outline") : ""}
       <h2>Поддержка</h2><p>Разработчик получает текст обращения и приложенные вами email, скриншот и версию приложения.</p>
     </section>`);
   }

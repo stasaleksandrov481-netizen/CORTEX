@@ -1440,7 +1440,16 @@ button, .tile, .surface-option, .intro-mode { -webkit-tap-highlight-color:transp
 /* Dialogs: foreground should always separate from the chat behind it. */
 .history-drawer, .sheet { color:#fff; }
 .history-drawer::backdrop,.sheet::backdrop { background:rgba(0,0,0,.8); }
-.toast { border:1px solid rgba(255,255,255,.52); background:#050505; }
+.toast {
+  bottom: auto;
+  top: 12px;
+  border: 1px solid rgba(255,255,255,.3);
+  border-radius: 20px;
+  background: #22252b;
+  color: #fff;
+}
+.ime-open .toast { bottom: auto; }
+.toast:empty, .toast[hidden] { display: none; }
 .jump-latest { border-color:rgba(255,255,255,.72); }
 /* Small phones and landscape Android: prioritize controls over decorative areas. */
 @media (max-width:375px) {

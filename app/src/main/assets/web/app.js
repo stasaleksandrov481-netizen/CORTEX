@@ -2,7 +2,7 @@
 
 (() => {
   const M = Cortex, U = CortexUI, Api = CortexApi, S = M.state, Wave = CortexWave;
-  const Markdown = CortexMarkdown, Phone = CortexPhone, Motion = CortexMotion;
+  const Markdown = CortexMarkdown, Motion = CortexMotion;
   const { esc, icon, button, iconButton } = U;
   const app = document.querySelector("#app");
   const screen = document.querySelector("#screen");
@@ -17,10 +17,10 @@
   const device = window.CortexDevice;
   const systemMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const routes = new Set([...U.tabs.map(([name]) => name), ...Object.keys(U.parent)]);
-  const drafts = new Map(), errors = new Map(), ruleDrafts = new Map(), phoneReplies = new Map(), actionReplies = new Map();
+  const drafts = new Map(), errors = new Map(), ruleDrafts = new Map(), actionReplies = new Map();
   const filters = { search: "", onlySaved: false };
-  const connection = { google: false, tools: false, plans: false, profiles: false, repair: false, checked: false };
-  let wakeState = "", islandCamera = "drop", deviceFacts = {};
+  const connection = { google: false, profiles: false, checked: false, visualPrivacy: false };
+  let wakeState = "", islandCamera = "drop";
   const permissions = { microphone: false, notifications: false, overlay: false, screenLock: false, screenLockSupported: false, brightness: false, verifyApps: false, screenAutomation: false, assistant: false, assistantSupported: false };
   let route = "home", chatId = "", rule = "goal";
   let pending, login, voice, readoutId, activeSheet, ghost, pageMotion, composerMotion, headingMotion, clearMorph, screenContext, drawerExit, sheetExit, inlineToast, toastTimer;
@@ -80,6 +80,7 @@
   }
 
   function flash(message) {
+    if (!String(message || "").trim()) return;
     clearTimeout(toastTimer);
     inlineToast?.remove();
     const dialog = sheet.open ? sheet : drawer.open ? drawer : null;
@@ -520,10 +521,7 @@
       if (epoch !== statusEpoch || data.fault) return;
       connection.checked = true;
       connection.google = Boolean(data.google);
-      connection.tools = data.device_tools === true;
-      connection.plans = data.device_action_plan === true;
       connection.profiles = data.device_profiles === true;
-      connection.repair = data.device_repair === true;
       if (!login) setAccount(data.account);
       if (["profile", "models"].includes(route)) render();
     } catch {}
@@ -540,6 +538,25 @@
     login = null;
     Api.request("auth-cancel").catch(() => {});
     if (route === "profile") render();
+  }
+
+  function showLogin(attempt) {
+    showSheet("Вход через Google", `<div class="stack">
+      <p class="muted" data-login-status>Подтвердите вход в браузере. CORTEX проверит результат после возврата.</p>
+      <div class="actions">${button("Отмена", "", "close")}</div></div>`, { cleanup: stopLogin });
+    attempt.timer = setTimeout(pollLogin, 1500);
+  }
+
+  async function restoreLogin() {
+    if (!Api.available || !device || login) return;
+    try {
+      const result = await Api.request("auth-resume");
+      if (login || !(result.expires_at > Date.now())) return;
+      const attempt = { busy: false, expires: result.expires_at, timer: 0 };
+      login = attempt;
+      showLogin(attempt);
+      pollLogin();
+    } catch {}
   }
 
   async function pollLogin() {
@@ -586,7 +603,8 @@
   async function startLogin() {
     if (login) return;
     if (!Api.available || !device) { flash(Api.failure(Api.android ? "webview" : "preview").message); return; }
-    if (!connection.google) { flash(Api.failure("account_config").message); return; }
+    if (!connection.checked && connectionLoad) await Promise.race([connectionLoad, wait(2000)]);
+    if (connection.checked && !connection.google) { flash(Api.failure("account_config").message); return; }
     const attempt = { busy: true, expires: Infinity, timer: 0 };
     login = attempt;
     render();
@@ -595,11 +613,8 @@
       if (login !== attempt) return;
       attempt.expires = Date.now() + 1000 * (result.expires_in || 300);
       attempt.busy = false;
-      showSheet("Вход через Google", `<div class="stack">
-        <p class="muted" data-login-status>После подтверждения в браузере вернитесь в CORTEX.</p>
-        <div class="actions">${button("Отмена", "", "close")}</div></div>`, { cleanup: stopLogin });
+      showLogin(attempt);
       if (!sendDevice("open-login", { url: result.url })) updateLogin("Не удалось открыть браузер.");
-      attempt.timer = setTimeout(pollLogin, 2700);
     } catch (error) {
       if (login === attempt) {
         login = null;
@@ -651,23 +666,8 @@
     });
   }
 
-  function phoneAction(command) {
-    const id = M.id("command");
-    return new Promise(resolve => {
-      const done = result => {
-        clearTimeout(timer);
-        phoneReplies.delete(id);
-        resolve(result);
-      };
-      const timer = setTimeout(() => done({ status: "unavailable" }), 6500);
-      phoneReplies.set(id, done);
-      if (!sendDevice("phone-action", { id, command })) done({ status: "unavailable" });
-    });
-  }
-
-  function nativeAction(job, text, commands) {
+  function nativeAction(job, text) {
     if (!device || !S.preferences.phoneActions || job.explain || job.screen) return Promise.resolve(null);
-    const operation = commands ? "action-plan" : "action-start";
     const id = M.id("action");
     job.nativeRunning = true;
     return new Promise(resolve => {
@@ -684,8 +684,8 @@
       };
       const timer = setTimeout(() => {
         sendDevice("action-stop");
-        done({ text: "Время задачи истекло. Проверьте последний шаг на экране.", external: !appVisible(), observations: [], blocked: true });
-      }, 124000);
+        done({ text: "Время задачи истекло. Проверьте последний шаг на экране.", external: !appVisible(), resumable: true });
+      }, 240000);
       actionReplies.set(id, value => {
         if (value.phase === "progress") {
           if (pending !== job) return;
@@ -693,120 +693,52 @@
           if (voice && job.voice === voice) voiceStatus("opening", value.text);
           if (activeChat(job) && appVisible()) render({ bottom: true });
         } else if (value.phase === "result") {
-          done({ text: value.text, external: value.external === true || !appVisible(),
-            observations: Array.isArray(value.observations) ? value.observations : [],
-            blocked: value.blocked === true });
+          done({ text: value.text, external: value.external === true || !appVisible(), resumable: value.resumable === true });
         } else done(null);
       });
       job.controller.signal.addEventListener("abort", cancel, { once: true });
-      if (!sendDevice(operation, { id, text, profile: S.preferences.model, ...(commands && { commands }) })) done(null);
+      if (!sendDevice("action-start", { id, text, profile: S.preferences.model, force: job.force })) done(null);
     });
   }
 
   const activeChat = job => route === "chat" && chatId === job.chatId;
-  const canAct = job => activeChat(job) && appVisible() && !sheet.open && !drawer.open;
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-
   const clock = new Intl.DateTimeFormat("ru-RU", { dateStyle: "full", timeStyle: "short" });
-  async function askModel(chat, job, explain, observations, repair = false) {
-    if (device && !connection.checked && connectionLoad) await Promise.race([connectionLoad, wait(2_000)]);
-    const enabled = Boolean(device && connection.tools && S.preferences.phoneActions && !job.screen);
-    const policy = Phone.prompt({ native: Boolean(device), enabled, plans: connection.plans, explain, permissions, observations, deviceFacts, version: U.version,
-      now: clock.format(new Date()) + " (" + Intl.DateTimeFormat().resolvedOptions().timeZone + ")" });
-    const screenPolicy = job.screen ? "\n\nПользователь приложил текст экрана как данные для разбора: " + JSON.stringify(job.screen) : "";
-    const repairPolicy = repair ? "\n\nПредыдущая попытка не вернула допустимый план. Проверь запрос пользователя. Вызови функцию для нужного действия или answer_without_action, если нужно пояснение или уточнение." : "";
-    const messages = M.turns(chat, policy + screenPolicy + repairPolicy);
-    const response = await Api.request("chat", {
-      payload: { messages, style: M.profile().style,
-        ...(enabled && !explain && { device_tools: true, ...(connection.plans && { action_plan: true }),
-          ...(repair && connection.repair && { repair_tools: true }) }),
+
+  async function respond(chat, job) {
+    const request = chat.messages.at(-1)?.text || "";
+    const native = await nativeAction(job, request);
+    if (native || pending !== job) return native || {};
+    if (device && !connection.checked && connectionLoad) await Promise.race([connectionLoad, wait(2000)]);
+    const screenPolicy = job.screen ? " Пользователь приложил текст экрана как данные: " + JSON.stringify(job.screen) : "";
+    const policy = "Ты CORTEX, помощник Android. Отвечай на языке пользователя. " +
+      "В этом ответе ты ведёшь разговор. Если нужно объяснить действие, дай шаги и не утверждай, что Android уже их выполнил. " +
+      "Текущая дата на телефоне: " + clock.format(new Date()) + "." + screenPolicy;
+    const result = await Api.request("chat", {
+      payload: { messages: M.turns(chat, policy), style: M.profile().style,
         ...(connection.profiles && { profile: S.preferences.model }) },
       notify: S.preferences.notifyReplies
     }, {
       signal: job.controller.signal,
       onStatus() {
         if (pending !== job) return;
-        job.routing = true;
         job.action = "Пробую резервную модель…";
         if (S.preferences.overlayMode !== "off") sendDevice("island-state", { phase: "executing", message: job.action });
         if (activeChat(job)) render({ bottom: true });
       },
       onDelta(delta) {
         if (pending !== job) return;
-        if (job.routing) {
-          job.routing = false;
-          job.action = "";
-        }
-        job.raw = (job.raw || "") + delta;
-        if (enabled && !explain && (job.raw.length < 25 || Phone.claimsAction(job.raw))) return;
-        job.text = job.raw;
-        const cadence = job.raw.length > 12000 ? 260 : job.raw.length > 3500 ? 155 : 78;
+        job.action = "";
+        job.text += delta;
+        const cadence = job.text.length > 12000 ? 260 : job.text.length > 3500 ? 155 : 78;
         if (!job.renderTimer) job.renderTimer = setTimeout(() => { job.renderTimer = 0; drawDelta(job); }, cadence);
       }
     });
-    job.routing = false;
     job.action = "";
-    if (!enabled || explain) return { text: typeof response.text === "string" ? response.text : "", commands: [] };
-    return Phone.decode(response);
+    return { text: typeof result.text === "string" ? result.text : "" };
   }
 
-  async function respond(chat, job, explain) {
-    const request = chat.messages.at(-1)?.text || "";
-    const native = await nativeAction(job, request);
-    if (native || pending !== job) return native || {};
-    const reports = [], observations = [], seen = new Set();
-    let external = false;
-    let executed = 0;
-    for (let round = 0; round < 3; round++) {
-      if (pending !== job) return {};
-      job.action = job.text = "";
-      if (activeChat(job)) render({ bottom: true });
-      job.raw = "";
-      let choice = await askModel(chat, job, explain, observations);
-      if (pending !== job) return {};
-      if (!explain && !job.screen && (choice.error || !choice.commands.length && Phone.claimsAction(choice.text))) {
-        if (connection.tools && canAct(job)) {
-          job.raw = job.text = "";
-          choice = await askModel(chat, job, explain, observations, true);
-        }
-        if (!choice.error && !choice.commands.length && Phone.claimsAction(choice.text)) {
-          choice = { error: "tool_arguments" };
-        }
-      }
-      if (pending !== job) return {};
-      if (choice.error) {
-        reports.push(choice.error === "multiple_tools" ? "Уточните, с каких действий начать." : "Уточните параметры нужного действия.");
-        break;
-      }
-      if (!choice.commands.length) {
-        return { text: [reports.join("\n\n"), choice.text.trim()].filter(Boolean).join("\n\n"), external };
-      }
-      if (!canAct(job) && !external) return { text: "Вернитесь в чат CORTEX, чтобы выполнить действия.", external };
-      const commands = [];
-      const signatures = new Set();
-      let continueFromResult = false;
-      for (const { next, ...action } of choice.commands) {
-        const signature = JSON.stringify(Object.entries(action).sort(([a], [b]) => a.localeCompare(b)));
-        if (seen.has(signature) || executed + commands.length >= 8) continue;
-        signatures.add(signature);
-        commands.push(action);
-        if (next === "decide") { continueFromResult = true; break; }
-      }
-      if (!commands.length) break;
-      const result = await nativeAction(job, request, commands);
-      if (pending !== job) return {};
-      if (!result) return { text: "Передача плана в Android не удалась.", external };
-      signatures.forEach(signature => seen.add(signature));
-      executed += result.observations.length;
-      reports.push(result.text);
-      observations.push(...result.observations);
-      external = external || result.external;
-      if (result.blocked || !continueFromResult || !result.observations.length || external || executed >= 8) break;
-    }
-    return { text: reports.join("\n\n"), external };
-  }
-
-  async function answer(chat, text, { retry = false, from, voiceTurn, explain = false, includeScreen = true } = {}) {
+  async function answer(chat, text, { retry = false, from, voiceTurn, explain = false, includeScreen = true, force = false } = {}) {
     if (!chat || !text || pending) return;
     if (voiceTurn && voice === voiceTurn) voiceStatus("thinking", "Думаю…");
     if (!retry) {
@@ -819,16 +751,16 @@
     errors.delete(chat.id);
     M.touch(chat);
     if (chat.saved) saved();
-    const job = { chatId: chat.id, text: "", completed: false, renderTimer: 0, controller: new AbortController(), voice: voiceTurn, explain, screen: attachment };
+    const job = { chatId: chat.id, text: "", completed: false, renderTimer: 0, controller: new AbortController(), voice: voiceTurn, explain, force, screen: attachment };
     pending = job;
     if (from) navigate("chat", { id: chat.id, origin: from, messageEnter: true });
     else if (activeChat(job)) render({ bottom: true, messageEnter: !retry });
     historyItems();
     try {
-      const outcome = await respond(chat, job, explain);
+      const outcome = await respond(chat, job);
       if (pending !== job) return;
       if (!outcome.text?.trim()) throw Api.failure("empty");
-      chat.messages.push({ role: "assistant", text: outcome.text });
+      chat.messages.push({ role: "assistant", text: outcome.text, ...(outcome.resumable && { resumable: true }) });
       job.completed = true;
       M.touch(chat);
       if (chat.saved) saved();
@@ -1056,7 +988,7 @@
     voiceControl.innerHTML = icon(["waiting", "error", "starting"].includes(phase) ? "mic" : "stop", 17);
     voiceControl.setAttribute("aria-label", labels[phase]);
     voiceControl.title = labels[phase];
-    voiceControl.disabled = ["starting", "recognizing", "opening"].includes(phase);
+    voiceControl.disabled = ["starting", "recognizing"].includes(phase);
     if (!["listening", "hearing"].includes(phase)) voicePanel.style.setProperty("--voice-level", "0");
     syncComposer();
   }
@@ -1117,7 +1049,7 @@
     if (["listening", "hearing"].includes(job.phase)) {
       recognizing(job);
       sendDevice("voice-finish", { id: job.recognition });
-    } else if (["thinking", "preparing", "speaking"].includes(job.phase)) {
+    } else if (["thinking", "opening", "preparing", "speaking"].includes(job.phase)) {
       if (pending?.voice === job) stopAnswer();
       if (job.speech) sendDevice("silence", { id: job.speech });
       job.speech = null;
@@ -1224,11 +1156,13 @@
         entries.map(entry => '<li><time>' + esc(new Date(entry.at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })) +
         '</time><span>' + esc(entry.message) + '</span></li>').join("") + '</ol>' : '<p class="muted">Действий пока нет.</p>');
     }
-    if (message.type === "phone") phoneReplies.get(message.id)?.(message.result || { status: "unavailable" });
+    if (message.type === "visual-privacy") {
+      connection.visualPrivacy = message.enabled === true;
+      if (route === "privacy") render();
+    }
     if (message.type === "background") closeVoice();
     if (message.type === "screen-context") acceptScreen(message.context);
     if (message.type === "permissions") {
-      if (message.capabilities) deviceFacts = message.capabilities;
       if (["drop", "punch", "left", "right", "none"].includes(message.islandCamera)) islandCamera = message.islandCamera;
       for (const key of Object.keys(permissions)) if (Object.hasOwn(message,key)) permissions[key] = Boolean(message[key]);
       window.CortexSetup?.updatePermissions(permissions);
@@ -1246,6 +1180,7 @@
       flash(message.message || "Разрешите отображение поверх приложений.");
     }
     if (message.type === "browser" && !message.ok) updateLogin("Не удалось открыть браузер Android.");
+    if (message.type === "auth-return") { if (login) pollLogin(); else restoreLogin(); }
     if (message.type === "copy") flash(message.ok ? "Скопировано" : "Не удалось скопировать");
     if (message.type === "link" && !message.ok) flash("Не удалось открыть ссылку.");
     if (message.type === "settings" && !message.ok) flash("Не удалось открыть настройки Android.");
@@ -1352,21 +1287,10 @@
     "drop-screen"() { screenContext = null; refreshScreen(); },
     capabilities: (_, control) => submitExample("Что ты умеешь?", control, true),
     "try-tool": (text, control) => submitExample(text, control),
-    async "quick-tool"(target, control) {
-      if (!device) { flash("Быстрый доступ работает в приложении Android."); return; }
-      const command = target === "torch" ? { kind: "torch", mode: "toggle" } : { kind: "panel", target };
-      if (!Phone.validate(command)) return;
-      control.disabled = true;
-      haptic();
-      try {
-        const result = await phoneAction(command);
-        if (!["opened", "panel"].includes(result.status)) flash(Phone.result(command, result));
-      } finally { control.disabled = false; }
-    },
+    "resume-visual"() { const chat = current(); if (chat) return answer(chat, "Продолжи", { force: true }); },
+    "visual-privacy"() { sendDevice("visual-privacy", { enabled: !connection.visualPrivacy }); },
     "assistant-permission": () => sendDevice("assistant-permission"),
     "verification-permission": () => window.CortexSetup?.openPermission("screenAutomation"),
-    "lock-permission": () => sendDevice("lock-permission"),
-    "brightness-permission": () => sendDevice("brightness-permission"),
     "microphone-permission": () => {
       if (!window.CortexIslandControl) {
         if (sendDevice("open-settings")) flash("Выберите «Разрешения» → «Микрофон» в настройках CORTEX.");
@@ -1553,7 +1477,7 @@
     splashPrevious = null;
     const hidden = document.hidden || window.cortexAppVisible === false;
     document.documentElement.classList.toggle("app-background", hidden);
-    if (!hidden) { pollLogin(); sendDevice("screen-context"); }
+    if (!hidden) pollLogin();
   }
   document.addEventListener("visibilitychange", visibilityChanged);
   addEventListener("cortex-app-visibility", visibilityChanged);
@@ -1572,9 +1496,11 @@
     addEventListener("cortex-frame-ready", begin, { once: true });
   } else showSplash();
   sendDevice("permissions");
+  sendDevice("visual-privacy");
   syncIslandOptions();
   sendDevice("support-notify-config", { enabled: S.preferences.notifyReplies });
   if (S.preferences.hotwordEnabled && S.preferences.overlayMode !== "off") sendDevice("wake-config", { enabled: true });
   sendDevice("screen-context");
   connectionLoad = refreshConnection();
+  restoreLogin();
 })();

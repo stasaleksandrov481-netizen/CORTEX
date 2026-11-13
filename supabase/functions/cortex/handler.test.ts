@@ -11,6 +11,7 @@ const replyId = "1f8188b2-9176-4be1-b0cf-8d9ef890eaa0";
 
 function fixture(maintenance = false, streamedReply?: () => Response) {
   let ticket: Record<string, unknown> | null = null;
+  let login: Record<string, unknown> | null = null;
   const models: string[] = [];
   const requests: string[] = [];
   const app = createHandler({
@@ -51,6 +52,19 @@ function fixture(maintenance = false, streamedReply?: () => Response) {
       case "/rest/v1/cortex_release_versions": return Response.json([]);
       case "/rest/v1/cortex_admin_roles": return Response.json([{ role: "admin" }]);
       case "/auth/v1/settings": return Response.json({ external: { google: true } });
+      case "/rest/v1/rpc/cortex_begin_login":
+        login = body;
+        return Response.json(null);
+      case "/rest/v1/cortex_auth_flows":
+        assert.ok(login);
+        assert.equal(url.searchParams.get("state_hash"), "eq." + login.p_state_hash);
+        return Response.json(body.stage === "exchanging" ? [{ verifier: login.p_verifier }] : [{ stage: body.stage }]);
+      case "/auth/v1/token":
+        assert.equal(url.searchParams.get("grant_type"), "pkce");
+        assert.equal(body.code_verifier, login?.p_verifier);
+        assert.equal(body.auth_code, "test-google-code");
+        return Response.json({ user: { id: accountId, email: "admin@example.test",
+          email_confirmed_at: "2026-11-13T12:00:00.000Z", app_metadata: { provider: "google" } } });
       case "/rest/v1/rpc/cortex_reserve":
       case "/rest/v1/cortex_installs":
       case "/rest/v1/cortex_app_sessions": return Response.json(null);
@@ -79,6 +93,38 @@ function fixture(maintenance = false, streamedReply?: () => Response) {
   }
   return { call, models, requests };
 }
+
+test("Android Google callback uses PKCE and returns to the app without a bearer token in the URL", async () => {
+  const { call } = fixture();
+  const start = await call("auth/start?return=android", {});
+  assert.equal(start.status, 200);
+  const { url, poll } = await start.json();
+  assert.match(poll, /^[A-Za-z0-9_-]{43}$/);
+  const authorize = new URL(url);
+  assert.equal(authorize.searchParams.get("provider"), "google");
+  assert.equal(authorize.searchParams.get("code_challenge_method"), "s256");
+  const callback = new URL(String(authorize.searchParams.get("redirect_to")));
+  assert.equal(callback.protocol, "https:");
+  assert.match(callback.pathname, /\/auth\/callback\/android-[A-Za-z0-9_-]{43}$/);
+  const returned = await call("auth/callback/" + callback.pathname.split("/").at(-1) + "?code=test-google-code");
+  assert.equal(returned.status, 303);
+  assert.equal(returned.headers.get("location"), "app.cortex.assistant://oauth/return");
+  assert.match(await returned.text(), /Вход выполнен/);
+});
+
+test("Google callback routes to the requesting preview and rejects arbitrary schemes", async () => {
+  const { call } = fixture();
+  assert.equal((await call("auth/start?return=android&scheme=another.app", {})).status, 400);
+  const scheme = "app.cortex.assistant.preview.v103";
+  const start = await call("auth/start?return=android&scheme=" + scheme, {});
+  assert.equal(start.status, 200);
+  const authorize = new URL((await start.json()).url);
+  const callback = new URL(String(authorize.searchParams.get("redirect_to")));
+  const path = callback.pathname.split("/").at(-1);
+  assert.match(path ?? "", /^android-v103-[A-Za-z0-9_-]{43}$/);
+  const returned = await call("auth/callback/" + path + "?code=test-google-code");
+  assert.equal(returned.headers.get("location"), scheme + "://oauth/return");
+});
 
 test("retries a rate-limited provider with a different :free model", async () => {
   const { call, models } = fixture();

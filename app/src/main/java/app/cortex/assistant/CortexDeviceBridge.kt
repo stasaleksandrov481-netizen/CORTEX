@@ -2,7 +2,6 @@ package app.cortex.assistant
 
 import android.Manifest
 import android.app.Activity
-import android.app.admin.DevicePolicyManager
 import android.content.*
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -20,10 +19,10 @@ import java.io.ByteArrayOutputStream
 internal class CortexDeviceBridge(
     private val activity: Activity,
     private val speech: CortexSpeech,
+    private val openGoogleLogin: (String) -> Boolean,
     private val emit: (JSONObject) -> Unit
 ) : AutoCloseable {
     private val context get() = activity.applicationContext
-    private val phone by lazy { CortexPhoneActions(activity) }
     private val engineDelegate = lazy { CortexActionEngine(activity) }
     private val engine by engineDelegate
     private var pendingImage = false
@@ -36,55 +35,27 @@ internal class CortexDeviceBridge(
             "open-settings" -> sendAction("settings") { open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))) }
             "assistant-permission" -> open(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
             "verification-permission" -> open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            "lock-permission" -> {
-                val admin = ComponentName(context, CortexDeviceAdmin::class.java)
-                val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin)
-                open(intent)
-            }
-            "brightness-permission" -> open(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:${context.packageName}")))
             "notification-permission" -> requestPermission(Manifest.permission.POST_NOTIFICATIONS)
             "microphone-permission" -> requestPermission(Manifest.permission.RECORD_AUDIO)
             "tap" -> vibrate()
-            "phone-action" -> {
+            "action-start" -> {
                 val id = body.optString("id")
-                val command = body.optJSONObject("command")
-                fun reply(result: JSONObject) = emit(JSONObject().put("type", "phone").put("id", id).put("result", result))
-                if (command == null) reply(JSONObject().put("status", "invalid"))
-                else if (CortexActionState.gate != "open") reply(JSONObject().put("status", "disabled"))
-                else phone.executeChecked(command) { result ->
-                    CortexActionState.log(context, "Команда Android: " + command.optString("kind") + " · " + result.optString("status"))
-                    reply(result)
+                fun event(phase: String, text: String = "", ok: Boolean = false, resumable: Boolean = false) =
+                    emit(JSONObject().put("type", "action").put("id", id).put("phase", phase).put("text", text)
+                        .put("ok", ok).put("resumable", resumable).put("external", !CortexRuntime.appVisible))
+                val handled = engine.start(body.optString("text"), body.optString("profile"),
+                    force = body.optBoolean("force"), beforeScreen = { activity.moveTaskToBack(true) },
+                    progress = { event("progress", it) }) { result ->
+                    event("result", result.text, result.ok, result.resumable)
                 }
+                if (!handled) event("pass")
             }
-            "action-start", "action-plan" -> {
-                val id = body.optString("id")
-                fun event(phase: String, text: String = "", ok: Boolean = false) =
-                    emit(JSONObject().put("type", "action").put("id", id).put("phase", phase).put("text", text).put("ok", ok))
-                val request = body.optString("text")
-                val profile = body.optString("profile")
-                if (body.optString("operation") == "action-plan") {
-                    val commands = body.optJSONArray("commands")
-                    if (commands == null || commands.length() !in 1..CortexActionSequence.MAX_STEPS) {
-                        event("result", "Уточните шаги задачи.")
-                        return
-                    }
-                    val steps = (0 until commands.length()).mapNotNull(commands::optJSONObject)
-                    if (steps.size != commands.length()) {
-                        event("result", "План действий не удалось прочитать.")
-                        return
-                    }
-                    engine.runPlan(steps, request, profile, progress = { event("progress", it) }) { result ->
-                        emit(JSONObject().put("type", "action").put("id", id).put("phase", "result")
-                            .put("text", result.text).put("ok", result.ok).put("external", result.external)
-                            .put("observations", result.observations).put("blocked", result.blocked))
-                    }
-                } else {
-                    val handled = engine.start(request, profile,
-                        progress = { event("progress", it) }, finished = { result, ok -> event("result", result, ok) })
-                    if (!handled) event("pass")
-                }
+            "action-stop" -> CortexActionState.stop()
+            "visual-privacy" -> {
+                val options = context.getSharedPreferences("cortex-display", Context.MODE_PRIVATE)
+                if (body.has("enabled")) options.edit().putBoolean("visual-model-consent", body.optBoolean("enabled")).apply()
+                emit(JSONObject().put("type", "visual-privacy").put("enabled", options.getBoolean("visual-model-consent", false)))
             }
-            "action-stop" -> if (engineDelegate.isInitialized()) engine.cancel()
             "action-history" -> emit(JSONObject().put("type", "action-history").put("entries", CortexActionState.history(context)))
             "gate-state" -> CortexActionState.setGate(body.optString("mode"))
             "support-notify-config" -> CortexSupportNotification.configure(context, body.optBoolean("enabled"))
@@ -118,8 +89,7 @@ internal class CortexDeviceBridge(
                 emit(JSONObject().put("type", "link").put("ok", ok))
             }
             "open-login" -> {
-                val url = body.optString("url")
-                val ok = url.startsWith("https://") && launch(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                val ok = openGoogleLogin(body.optString("url"))
                 emit(JSONObject().put("type", "browser").put("ok", ok))
             }
             "choose-image" -> {
@@ -135,8 +105,11 @@ internal class CortexDeviceBridge(
                 }, 502)
             }
             "screen-context" -> {
-                // No silent screen capture. Accessibility screen reading is not part of this source rebuild.
-                emit(JSONObject().put("type", "screen-context").put("context", JSONObject.NULL))
+                val frame = CortexScreenService.connected?.frame()?.takeUnless { it.secure || it.hasPrivateFields || it.pkg == context.packageName }
+                val text = frame?.tree?.map { VisualLabels.forModel(it.label) }?.filter(String::isNotBlank)
+                    ?.distinct()?.joinToString("\n")?.take(2600)
+                if (!text.isNullOrBlank() && frame != null) emit(JSONObject().put("type", "screen-context")
+                    .put("context", JSONObject().put("app", frame.pkg).put("text", text)))
             }
             "overlay-config", "overlay-permission" -> emit(JSONObject().put("type", "overlay-mode").put("ok", false)
                 .put("message", "В версии 0.8.6 нет системной службы островка."))
@@ -156,16 +129,12 @@ internal class CortexDeviceBridge(
         } else refreshPermissions()
     }
     fun refreshPermissions() {
-        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val obj = JSONObject().put("type", "permissions")
             .put("microphone", Build.VERSION.SDK_INT < 23 || activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
             .put("notifications", Build.VERSION.SDK_INT < 33 || activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
-            .put("screenLock", dpm.isAdminActive(ComponentName(context, CortexDeviceAdmin::class.java)) ||
-                (Build.VERSION.SDK_INT >= 28 && CortexScreenService.connected != null))
-            .put("screenLockSupported", true)
+            .put("screenLock", Build.VERSION.SDK_INT >= 28 && CortexScreenService.connected != null)
+            .put("screenLockSupported", Build.VERSION.SDK_INT >= 28)
             .put("screenAutomation", CortexScreenService.connected != null)
-            .put("capabilities", phone.capabilities())
-            .put("brightness", Settings.System.canWrite(context))
             .put("verifyApps", CortexScreenService.connected != null)
             .put("overlay", Settings.canDrawOverlays(context))
         emit(obj)

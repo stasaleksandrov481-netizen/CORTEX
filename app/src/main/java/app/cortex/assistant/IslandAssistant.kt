@@ -7,14 +7,13 @@ import kotlin.math.ceil
 
 internal class IslandAssistant(context: Context) : AutoCloseable {
     private val gateway = CortexServerBridge(context)
-    private val phone = CortexPhoneActions(context)
     private val engine = CortexActionEngine(context)
     private val history = ArrayDeque<Pair<String, String>>()
     private var request: String? = null
     private var generation = 0L
 
     fun send(
-        text: String, profile: String, currentPackage: String?, beforeScreen: () -> Unit,
+        text: String, profile: String, beforeScreen: () -> Unit,
         toolsAllowed: () -> Boolean, progress: (String) -> Unit, delta: (String) -> Unit,
         finished: (String, Boolean) -> Unit
     ) {
@@ -26,27 +25,19 @@ internal class IslandAssistant(context: Context) : AutoCloseable {
             if (ok) remember(text, answer)
             finished(answer, ok)
         }
-        if (tools && engine.start(text, profile, currentPackage, beforeScreen, progress, ::finish)) return
+        if (tools && engine.start(text, profile, beforeScreen = beforeScreen, progress = progress) { result ->
+                finish(result.text, result.ok)
+            }) return
         val messages = JSONArray().put(message("system",
-            "Ты CORTEX, голосовой помощник Android. Пиши живо, дружелюбно и по делу. " +
-                "Представляйся только по просьбе. Продолжай разговор с учётом предыдущих реплик. " +
-                "Отвечай на языке пользователя. Учитывай состояние телефона и выданные разрешения. " +
-                (if (tools) """Для явно запрошенных действий вызови execute_phone_plan один раз со всеми шагами в исходном порядке.
-                    Для действий внутри любого установленного приложения добавь screen_task с названием приложения и конкретной целью.
-                    Открытие раздела, поиск, переход к переписке и ввод текста внутри приложения — задачи экрана.
-                    Открытие приложения без дальнейших действий — app. Для выхода из него используй close_app.
-                    Для фото добавь capture_photo, для выключения экрана — lock_screen. Если пользователь говорит «здесь», можно использовать текущее приложение.
-                    Текущее приложение: """ + (currentPackage?.let(phone::resolveApp)?.name ?: "неизвестно") + ". "
-                else "Сейчас доступен только разговор. ") +
-                "Результат действия подтверждает Android. Данные устройства: " + phone.capabilities()))
+            "Ты CORTEX, голосовой помощник Android. Отвечай живо, по делу и на языке пользователя. " +
+                "Учитывай предыдущие реплики. В этом ответе ты ведёшь разговор и ничего не меняешь на телефоне."))
         history.forEach { (input, output) -> messages.put(message("user", input)).put(message("assistant", output)) }
         messages.put(message("user", text))
         val route = if (profile == "deep") "deep" else "fast"
         val payload = JSONObject().put("messages", messages).put("style", "brief").put("profile", route)
-        if (tools) payload.put("device_tools", true).put("action_plan", true)
         request = gateway.chat(payload, { event ->
             if (turn == generation && event.optString("status") == "fallback") progress("Пробую резервную модель…")
-            if (turn == generation && event.has("delta") && !tools) delta(event.optString("delta"))
+            if (turn == generation && event.has("delta")) delta(event.optString("delta"))
         }) { outcome ->
             if (turn != generation) return@chat
             request = null
@@ -55,17 +46,6 @@ internal class IslandAssistant(context: Context) : AutoCloseable {
             when {
                 error.isNotEmpty() -> finish(errorMessage(error, outcome.optInt("retry_after")), false)
                 result == null -> finish("Кортекс не получил ответ. Попробуйте ещё раз.", false)
-                tools && result.has("tool_error") -> finish("Уточните действие или его параметры.", false)
-                tools && (result.has("tool") || result.has("tools")) -> {
-                    val commands = result.optJSONArray("tools") ?: JSONArray().put(result.optJSONObject("tool"))
-                    if (!toolsAllowed()) {
-                        finish("Управление устройством выключено.", false)
-                        return@chat
-                    }
-                    val actions = (0 until commands.length()).mapNotNull(commands::optJSONObject)
-                    if (actions.size != commands.length()) finish("Не удалось прочитать план действий.", false)
-                    else engine.runPlan(actions, text, profile, beforeScreen, progress) { finish(it.text, it.ok) }
-                }
                 else -> {
                     val plain = result.optString("text").trim()
                     when {

@@ -21,8 +21,8 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
     private var utteranceId: String? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
-
-    init { tts = TextToSpeech(activity.applicationContext) { status -> ttsReady = status == TextToSpeech.SUCCESS } }
+    private var ttsInitializing = false
+    private var ttsPending: Pair<String, () -> Unit>? = null
 
     private fun voice(id: String, phase: String, text: String? = null, level: Double? = null) {
         val e = JSONObject().put("type", "voice").put("id", id).put("phase", phase)
@@ -92,6 +92,25 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
     }
 
     fun speak(id: String, text: String, language: String, speed: Float) {
+        if (tts == null) {
+            ttsInitializing = true
+            ttsPending = id to { speak(id, text, language, speed) }
+            tts = TextToSpeech(activity.applicationContext) { status ->
+                ui.post {
+                    if (!ttsInitializing) return@post
+                    ttsInitializing = false
+                    ttsReady = status == TextToSpeech.SUCCESS
+                    val next = ttsPending
+                    ttsPending = null
+                    next?.second?.invoke()
+                }
+            }
+            return
+        }
+        if (ttsInitializing) {
+            ttsPending = id to { speak(id, text, language, speed) }
+            return
+        }
         if (!ttsReady || tts == null) { speech(id, "error"); return }
         try {
             tts?.stop()
@@ -110,6 +129,11 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
         } catch (_: Exception) { finishSpeech(id, "error") }
     }
     fun silence(id: String?) {
+        val waiting = ttsPending
+        if (waiting != null && (id == null || id == waiting.first)) {
+            ttsPending = null
+            speech(waiting.first, "stopped")
+        }
         val current = utteranceId ?: return
         if (id != null && id != current) return
         tts?.stop()
@@ -123,5 +147,12 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
         speech(id, phase)
     }
 
-    fun close() { stop(); silence(null); tts?.shutdown(); tts = null; ui.removeCallbacksAndMessages(null) }
+    fun close() {
+        stop()
+        silence(null)
+        ttsInitializing = false
+        tts?.shutdown()
+        tts = null
+        ui.removeCallbacksAndMessages(null)
+    }
 }

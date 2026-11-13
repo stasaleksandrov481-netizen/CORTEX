@@ -31,10 +31,10 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
     private val jobs = ConcurrentHashMap<String, FutureTask<Unit>>()
     private val main = Handler(Looper.getMainLooper())
     private val connections = ConcurrentHashMap<String, HttpURLConnection>()
+    private val loginLock = Any()
     private val installId = synchronized(installLock) {
         state.getString("install", null) ?: randomToken().also { state.edit().putString("install", it).apply() }
     }
-    @Volatile private var pollCode: String? = null
     private val endpoint = "https://jjcqrjztxohnifmziksy.supabase.co/functions/v1/cortex/v1/"
     private val cortexPackage = runCatching { context.packageManager.getPackageInfo(context.packageName,0) }.getOrNull()
 
@@ -96,17 +96,38 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
             "support-inbox" -> call("GET", "support/inbox", null, id)
             "chat" -> call("POST", "chat", request.optJSONObject("payload") ?: throw GatewayFailure("invalid"), id, onEvent)
             "support" -> call("POST", "support", request.optJSONObject("payload") ?: throw GatewayFailure("invalid"), id)
-            "auth-start" -> call("POST", "auth/start", JSONObject(), id).also { pollCode = it.optString("poll") }
-            "auth-poll" -> call("POST", "auth/poll", JSONObject().put("code", pollCode.orEmpty()), id).also {
-                if (it.optString("state") == "signed_in") {
-                    it.optString("token").takeIf { token -> token.isNotBlank() }?.let(store::put)
-                    pollCode = null
-                    it.remove("token") // Never expose the bearer token to JS.
+            "auth-start" -> synchronized(loginLock) {
+                call("POST", "auth/start?return=android&scheme=${BuildConfig.APPLICATION_ID}", JSONObject(), id).also {
+                    val code = it.optString("poll")
+                    val seconds = it.optInt("expires_in", 300).coerceIn(1, 300)
+                    if (!LOGIN_CODE.matches(code)) throw GatewayFailure("auth_denied")
+                    store.put("${System.currentTimeMillis() + seconds * 1000L}:$code", "login")
+                    it.remove("poll")
                 }
             }
-            "auth-cancel" -> { pollCode = null; JSONObject().put("cancelled", true) }
-            "logout" -> {
+            "auth-resume" -> JSONObject().apply {
+                val expiry = store.get("login")?.substringBefore(':')?.toLongOrNull() ?: 0L
+                put("expires_at", expiry)
+            }
+            "auth-poll" -> synchronized(loginLock) {
+                val pending = store.get("login").orEmpty()
+                val code = pending.substringAfter(':', "")
+                if ((pending.substringBefore(':').toLongOrNull() ?: 0L) <= System.currentTimeMillis() ||
+                    !LOGIN_CODE.matches(code)) throw GatewayFailure("auth_expired")
+                call("POST", "auth/poll", JSONObject().put("code", code), id).also {
+                    if (it.optString("state") == "signed_in") {
+                        val token = it.optString("token")
+                        if (!LOGIN_CODE.matches(token)) throw GatewayFailure("auth_denied")
+                        store.put(token)
+                        store.clear("login")
+                        it.remove("token") // Never expose the bearer token to JS.
+                    }
+                }
+            }
+            "auth-cancel" -> synchronized(loginLock) { store.clear("login"); JSONObject().put("cancelled", true) }
+            "logout" -> synchronized(loginLock) {
                 runCatching { call("DELETE", "session", null, id) }
+                store.clear("login")
                 store.clear()
                 JSONObject().put("ok", true)
             }
@@ -122,7 +143,7 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
             if (!jobs.containsKey(id)) throw InterruptedException()
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 12_000
-            connection.readTimeout = 92_000
+            connection.readTimeout = if (route.startsWith("auth/")) 20_000 else 92_000
             connection.requestMethod = method
             connection.setRequestProperty("Accept", if (onEvent == null) "application/json" else "text/event-stream")
             connection.setRequestProperty("X-Cortex-Install", installId)
@@ -185,7 +206,10 @@ internal class CortexServerBridge(context: Context) : AutoCloseable {
         executor.shutdownNow()
     }
     private class GatewayFailure(val code: String, val retryAfter: Int = 0) : Exception(code)
-    private companion object { val installLock = Any() }
+    private companion object {
+        val installLock = Any()
+        val LOGIN_CODE = Regex("^[A-Za-z0-9_-]{43}$")
+    }
     private fun randomToken(): String {
         val bytes = ByteArray(32)
         SecureRandom().nextBytes(bytes)
@@ -204,13 +228,13 @@ private class SecureSession(context: Context) {
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
         return generator.generateKey()
     }
-    @Synchronized fun put(token: String) {
+    @Synchronized fun put(token: String, name: String = "session") {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
         val combined = cipher.iv + cipher.doFinal(token.toByteArray(Charsets.UTF_8))
-        prefs.edit().putString("session", Base64.encodeToString(combined, Base64.NO_WRAP)).apply()
+        prefs.edit().putString(name, Base64.encodeToString(combined, Base64.NO_WRAP)).apply()
     }
-    @Synchronized fun get(): String? {
-        val raw = prefs.getString("session", null) ?: return null
+    @Synchronized fun get(name: String = "session"): String? {
+        val raw = prefs.getString(name, null) ?: return null
         return runCatching {
             val bytes = Base64.decode(raw, Base64.NO_WRAP)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -218,5 +242,5 @@ private class SecureSession(context: Context) {
             String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8)
         }.getOrNull()
     }
-    @Synchronized fun clear() { prefs.edit().remove("session").apply() }
+    @Synchronized fun clear(name: String = "session") { prefs.edit().remove(name).apply() }
 }

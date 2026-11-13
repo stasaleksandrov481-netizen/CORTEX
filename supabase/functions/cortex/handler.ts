@@ -6,6 +6,8 @@ import {
 import { createControl } from "./control.ts";
 
 const CAPABILITY = /^[A-Za-z0-9_-]{43}$/;
+const ANDROID_SCHEME = "app.cortex.assistant";
+const PREVIEW_SCHEME = /^app\.cortex\.assistant\.preview\.(v[0-9]{1,6})$/;
 const PROJECT = /^[a-z0-9]{6,63}\.supabase\.co$/;
 const PHOTO = new Set(["lh3.googleusercontent.com", "lh4.googleusercontent.com", "lh5.googleusercontent.com", "lh6.googleusercontent.com"]);
 const FREE_MODEL = /^[a-z0-9._-]+\/[a-z0-9._-]+:free$/;
@@ -47,18 +49,17 @@ async function hash(value: string): Promise<string> {
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status, headers: JSON_HEADERS });
 }
-function browserResult(success: boolean): Response {
+function androidReturn(path: string) {
+  const match = /^android-(?:(v[0-9]{1,6})-)?([A-Za-z0-9_-]{43})$/.exec(path);
+  if (!match) return { scheme: path.startsWith("android-") ? ANDROID_SCHEME : "", state: path };
+  return { scheme: match[1] ? ANDROID_SCHEME + ".preview." + match[1] : ANDROID_SCHEME, state: match[2] };
+}
+
+function browserResult(success: boolean, scheme = ""): Response {
   const title = success ? "Вход выполнен" : "Вход не завершён";
-  return new Response(
-    '<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<meta name="color-scheme" content="dark"><title>CORTEX</title>' +
-    '<main style="max-width:32rem;margin:16vh auto;padding:24px;font:16px system-ui">' +
-    "<p>CORTEX</p><h1>" + title + "</h1><p>Вернитесь в приложение CORTEX.</p></main></html>",
-    { headers: {
-      ...JSON_HEADERS, "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
-    } },
-  );
+  const headers: Record<string, string> = { ...JSON_HEADERS, "Content-Type": "text/plain; charset=utf-8" };
+  if (scheme) headers.Location = scheme + "://oauth/return";
+  return new Response(title + ". Вернитесь в приложение CORTEX.", { headers, status: scheme ? 303 : 200 });
 }
 
 function bearer(request: Request): string {
@@ -270,7 +271,9 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
     );
   }
 
-  async function begin(request: Request): Promise<Response> {
+  async function begin(request: Request, android: boolean, scheme: string | null): Promise<Response> {
+    const preview = scheme && PREVIEW_SCHEME.exec(scheme)?.[1];
+    if (scheme && (!android || (scheme !== ANDROID_SCHEME && !preview))) throw new Failure("invalid", 400);
     if (!await ready()) throw new Failure("storage_config", 503);
     if (!await google()) throw new Failure("account_config", 503);
     await reserve(
@@ -284,7 +287,8 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
     const url = new URL(publicApi + "/auth/v1/authorize");
     url.search = new URLSearchParams({
       provider: "google",
-      redirect_to: publicApi + "/functions/v1/cortex/v1/auth/callback/" + state,
+      redirect_to: publicApi + "/functions/v1/cortex/v1/auth/callback/" +
+        (android ? "android-" + (preview ? preview + "-" : "") : "") + state,
       code_challenge: await hash(verifier),
       code_challenge_method: "s256",
       prompt: "select_account",
@@ -292,14 +296,15 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
     return json({ url: url.toString(), poll, expires_in: 300 });
   }
 
-  async function callback(state: string, code: string): Promise<Response> {
-    if (!CAPABILITY.test(state)) return browserResult(false);
+  async function callback(path: string, code: string): Promise<Response> {
+    const { scheme, state } = androidReturn(path);
+    if (!CAPABILITY.test(state)) return browserResult(false, scheme);
     const filter = "cortex_auth_flows?state_hash=eq." + await hash(state) + "&expires_at=gt." + expires();
     const claims = await database<Array<{ verifier: string }>>(
       filter + "&stage=eq.pending", "PATCH", { stage: "exchanging" }, "return=representation",
     );
     const claim = claims[0];
-    if (!claim) return browserResult(false);
+    if (!claim) return browserResult(false, scheme);
     let stage = "denied";
     let account: Account | null = null;
     if (code && code.length <= 2048) {
@@ -332,7 +337,7 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
     const saved = await database<Array<unknown>>(
       filter + "&stage=eq.exchanging", "PATCH", { stage, account, verifier: "" }, "return=representation",
     );
-    return browserResult(stage === "approved" && saved.length === 1);
+    return browserResult(stage === "approved" && saved.length === 1, scheme);
   }
 
   async function poll(request: Request): Promise<Response> {
@@ -385,7 +390,9 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
         await control.presence(install, input, /^[A-Za-z0-9.+-]{1,24}$/.test(version) ? version : "unknown");
         return json({ gate: await control.gate(request, account?.id) });
       }
-      if (method === "POST" && path === "/v1/auth/start") return await begin(request);
+      if (method === "POST" && path === "/v1/auth/start") {
+        return await begin(request, url.searchParams.get("return") === "android", url.searchParams.get("scheme"));
+      }
       if (isCallback) return await callback(path.slice(callbackPath.length), url.searchParams.get("code") || "");
       if (method === "POST" && path === "/v1/auth/poll") return await poll(request);
       if (method === "DELETE" && path === "/v1/session") {
@@ -506,7 +513,7 @@ export function createHandler(env: Env, network: Network = fetch): (request: Req
       }
       return json({ error: "endpoint" }, 404);
     } catch (error) {
-      if (isCallback) return browserResult(false);
+      if (isCallback) return browserResult(false, androidReturn(path.slice(callbackPath.length)).scheme);
       if (error instanceof Failure) return json(failureBody(error), error.status);
       if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) return json({ error: "timeout" }, 504);
       console.warn("CORTEX gateway request failed");

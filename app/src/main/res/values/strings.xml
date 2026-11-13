@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources><string name="app_name">CORTEX</string>    <string name="cortex_screen_service">CORTEX — управление экраном</string>
-    <string name="cortex_screen_description">При запуске задачи CORTEX читает элементы выбранного приложения. После вашего согласия подписи элементов передаются модели для планирования. Остановить выполнение можно в CORTEX или через островок.</string>
+<resources>
+    <string name="app_name">CORTEX</string>
+    <string name="cortex_screen_service">CORTEX — управление экраном</string>
+    <string name="cortex_screen_description">Во время вашей задачи CORTEX читает экран, нажимает видимые элементы, прокручивает и вводит текст. Передача текста экрана модели требует согласия. Остановить задачу можно кнопкой CORTEX.</string>
 </resources>
