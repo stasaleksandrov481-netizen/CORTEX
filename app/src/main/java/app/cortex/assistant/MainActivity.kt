@@ -13,6 +13,8 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.browser.auth.AuthTabIntent
+import androidx.browser.customtabs.CustomTabsClient
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -36,7 +38,7 @@ class MainActivity : ComponentActivity() {
     private val authTab = AuthTabIntent.registerActivityResultLauncher(this) { result ->
         val uri = result.resultUri
         if (result.resultCode == AuthTabIntent.RESULT_OK && uri != null) authReturned(uri)
-        else if (::webView.isInitialized) deviceEvent(JSONObject().put("type", "auth-return"))
+        else if (::webView.isInitialized) deviceEvent(JSONObject().put("type", "auth-tab-closed"))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -137,7 +139,14 @@ class MainActivity : ComponentActivity() {
         require(uri.scheme == "https" && uri.host == "jjcqrjztxohnifmziksy.supabase.co" &&
             uri.path == "/auth/v1/authorize" && uri.getQueryParameter("provider") == "google")
         try {
-            AuthTabIntent.Builder().build().launch(authTab, uri, BuildConfig.APPLICATION_ID)
+            val browser = CustomTabsClient.getPackageName(this, null)
+            if (browser != null && CustomTabsClient.isAuthTabSupported(this, browser)) {
+                AuthTabIntent.Builder().build().also { it.intent.setPackage(browser) }
+                    .launch(authTab, uri, BuildConfig.APPLICATION_ID)
+            } else {
+                CustomTabsIntent.Builder().setColorScheme(CustomTabsIntent.COLOR_SCHEME_DARK).build()
+                    .also { if (browser != null) it.intent.setPackage(browser) }.launchUrl(this, uri)
+            }
         } catch (_: ActivityNotFoundException) {
             startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
         }
@@ -146,6 +155,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         intent.data?.let(::authReturned)
     }
 

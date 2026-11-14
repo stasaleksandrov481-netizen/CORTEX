@@ -64,11 +64,11 @@ internal class LiquidIslandView(
         strokeCap = Paint.Cap.ROUND
     }
     private val sheen = LinearGradient(0f, 0f, 0f, 1f,
-        intArrayOf(0xFF30333C.toInt(), 0xFF17191F.toInt(), 0xFF0C0D12.toInt(), 0xFF15171D.toInt()),
+        intArrayOf(0xFF333333.toInt(), 0xFF191919.toInt(), 0xFF0D0D0D.toInt(), 0xFF171717.toInt()),
         floatArrayOf(0f, .27f, .74f, 1f), Shader.TileMode.CLAMP)
     private val rim = SweepGradient(0f, 0f, intArrayOf(
-        0xFFC2D6F3.toInt(), 0xFF858FA4.toInt(), 0xFFE1EDF9.toInt(), 0xFF7C8395.toInt(),
-        0xFFADB4C8.toInt(), 0xFFE5EDFA.toInt(), 0xFFC2D6F3.toInt()
+        0xFFD4D4D4.toInt(), 0xFF8E8E8E.toInt(), 0xFFEBEBEB.toInt(), 0xFF838383.toInt(),
+        0xFFB4B4B4.toInt(), 0xFFECECEC.toInt(), 0xFFD4D4D4.toInt()
     ), floatArrayOf(0f, .16f, .34f, .53f, .68f, .84f, 1f))
     private val reflection = LinearGradient(0f, 0f, 0f, 1f,
         intArrayOf(0x82FFFFFF.toInt(), 0x15FFFFFF, 0x00FFFFFF, 0x30FFFFFF),
@@ -452,7 +452,7 @@ internal class LiquidIslandView(
         if (stoppable) {
             val x = body.right - 22 * density
             val radius = 4.2f * density
-            fill.color = 0xFFF7D0D9.toInt()
+            fill.color = 0xFFD9D9D9.toInt()
             fill.alpha = (alpha * 29).roundToInt()
             canvas.drawCircle(x, centerY, 14 * density, fill)
             fill.alpha = (alpha * 244).roundToInt()

@@ -1,0 +1,83 @@
+// Voice models are downloaded after installation. Only their runtimes ship in the APK.
+import java.security.MessageDigest
+import java.util.zip.ZipFile
+
+def output = layout.buildDirectory.dir('generated/voice-runtimes')
+def sherpa = [
+    url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-static-link-onnxruntime-1.13.8.aar',
+    sha: 'b22c3fc1b6a45666d28892bb2f7694beeb77a8362d7ebd77c1a5431ec9435471'
+]
+def executorch = [
+    url: 'https://ossci-android.s3.amazonaws.com/executorch/release/1.5.0-xnnpack/executorch.aar',
+    sha: 'dcb50be130e1e45d898b846f30dedf2d627fc410191b3fb4e870a2b104b89286'
+]
+def ruvoice = [
+    url: 'https://github.com/kost-t-human/ruvoice-tts/releases/download/v1.1.2/ruvoice-tts-1.1.2-lite.apk',
+    sha: 'b620b4e883f2c85e6575c5ff138eaea9c86ad315808e190efd1b8171604ce312'
+]
+
+def prepareVoiceRuntimes = tasks.register('prepareVoiceRuntimes') {
+    inputs.properties(sherpa: sherpa.sha, executorch: executorch.sha, ruvoice: ruvoice.sha)
+    outputs.dir(output)
+    doLast {
+        def root = output.get().asFile
+        project.delete(root)
+        root.mkdirs()
+
+        def digest = { file ->
+            def sha = MessageDigest.getInstance('SHA-256')
+            file.withInputStream { input ->
+                byte[] bytes = new byte[65536]
+                for (int n = input.read(bytes); n != -1; n = input.read(bytes)) sha.update(bytes, 0, n)
+            }
+            sha.digest().encodeHex().toString()
+        }
+        def download = { spec, name ->
+            File target = new File(temporaryDir, name)
+            if (target.isFile() && digest(target) == spec.sha) return target
+            target.delete()
+            def http = new URI(spec.url).toURL().openConnection()
+            http.connectTimeout = 20000
+            http.readTimeout = 60000
+            try {
+                http.inputStream.withCloseable { input -> target.withOutputStream { it << input } }
+                if (digest(target) != spec.sha) throw new GradleException("Invalid checksum for ${name}")
+            } catch (Exception error) {
+                target.delete()
+                throw new GradleException("Unable to prepare ${name}", error)
+            } finally {
+                http.disconnect()
+            }
+            target
+        }
+        def extract = { file, Map<String, String> paths ->
+            new ZipFile(file).withCloseable { zip ->
+                paths.each { from, to ->
+                    def entry = zip.getEntry(from)
+                    if (entry == null) throw new GradleException("Missing ${from} in ${file.name}")
+                    def dest = new File(root, to)
+                    dest.parentFile.mkdirs()
+                    zip.getInputStream(entry).withCloseable { input -> dest.withOutputStream { it << input } }
+                }
+            }
+        }
+
+        def onnx = download(sherpa, 'sherpa-android.aar')
+        extract(onnx, ['classes.jar': 'sherpa.jar'])
+        ['arm64-v8a', 'x86_64'].each { abi ->
+            extract(onnx, [("jni/${abi}/libsherpa-onnx-jni.so".toString()): "jni/${abi}/libsherpa-onnx-jni.so".toString()])
+        }
+
+        def torch = download(executorch, 'executorch-android.aar')
+        extract(torch, ['classes.jar': 'executorch.jar',
+            'jni/x86_64/libexecutorch.so': 'jni/x86_64/libexecutorch.so'])
+        // Upstream's Android build uses ARMv8.0-compatible code, including Snapdragon 680.
+        extract(download(ruvoice, 'ruvoice-lite.apk'), [
+            'lib/arm64-v8a/libexecutorch.so': 'jni/arm64-v8a/libexecutorch.so'
+        ])
+    }
+}
+
+android.sourceSets.main.jniLibs.srcDir(output.map { it.dir('jni') })
+dependencies.add('implementation', files(output.map { [it.file('sherpa.jar').asFile, it.file('executorch.jar').asFile] }).builtBy(prepareVoiceRuntimes))
+tasks.named('preBuild') { dependsOn(prepareVoiceRuntimes) }

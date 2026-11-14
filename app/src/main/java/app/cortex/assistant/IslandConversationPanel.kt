@@ -95,9 +95,9 @@ internal class IslandConversationPanel(
             overScrollMode = OVER_SCROLL_NEVER
             visibility = GONE
             background = GradientDrawable().apply {
-                setColor(0xFF191B23.toInt())
+                setColor(0xFF1B1B1B.toInt())
                 cornerRadius = dp(18).toFloat()
-                setStroke(dp(1), 0xFF373A47.toInt())
+                setStroke(dp(1), 0xFF3A3A3A.toInt())
             }
             addView(response, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         }
@@ -271,11 +271,11 @@ internal class IslandConversationPanel(
             val inset = .65f * density
             val radius = (height / 2f).coerceAtMost(29 * density)
             ink.style = Paint.Style.FILL
-            ink.color = if (focused) 0xFF222530.toInt() else 0xFF16181F.toInt()
+            ink.color = if (focused) 0xFF252525.toInt() else 0xFF181818.toInt()
             canvas.drawRoundRect(inset, inset, width - inset, height - inset, radius, radius, ink)
             ink.style = Paint.Style.STROKE
             ink.strokeWidth = density * .8f
-            ink.color = if (focused) 0xFF6F7892.toInt() else 0xFF353846.toInt()
+            ink.color = if (focused) 0xFF787878.toInt() else 0xFF383838.toInt()
             canvas.drawRoundRect(inset, inset, width - inset, height - inset, radius, radius, ink)
         }
     }

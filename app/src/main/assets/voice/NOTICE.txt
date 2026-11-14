@@ -1,0 +1,26 @@
+CORTEX voice synthesis
+
+RuVoice TTS v1.1.2 release models
+https://github.com/kost-t-human/ruvoice-tts/releases/tag/packs
+Silero v5.5 voices: Silero Models contributors, CC BY-NC-SA 4.0.
+https://github.com/snakers4/silero-models
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+The model archive is downloaded separately from its publisher and is not
+included in the CORTEX APK.
+
+sherpa-onnx 1.13.8
+Copyright the sherpa-onnx contributors. Apache License 2.0.
+https://github.com/k2-fsa/sherpa-onnx/tree/v1.13.8
+ONNX Runtime: Copyright Microsoft Corporation, MIT License.
+https://github.com/microsoft/onnxruntime
+
+PyTorch and ExecuTorch
+Copyright the PyTorch and ExecuTorch contributors. BSD 3-Clause.
+https://github.com/pytorch/pytorch
+https://github.com/pytorch/executorch/tree/v1.5.0
+The ARM64 ExecuTorch shared library is the unmodified binary from the
+RuVoice v1.1.2 release. Its build recipe is:
+https://github.com/kost-t-human/ruvoice-tts/blob/v1.1.2/tools/build_executorch_aar.sh
+The upstream source distributions contain their dependency notices.
+
+Other downloadable voice data is distributed under the publisher's license.

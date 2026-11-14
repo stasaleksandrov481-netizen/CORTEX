@@ -3,7 +3,7 @@
 const CortexUI = (() => {
   const M = Cortex;
   const icon = CortexIcons;
-  const version = "1.0.4";
+  const version = "1.0.5";
   const tabs = [
     ["chat", "Чат", "message"], ["phone-tools", "Вызов", "bolt"], ["home", "Кортекс", ""],
     ["notes", "Заметки", "note"], ["profile", "Профиль", "user"]
@@ -121,7 +121,7 @@ const CortexUI = (() => {
       (ctx.pending.action || ctx.pending.waiting ? actionProgress(ctx.pending) : thinking())}</div></article>` : "";
     const error = ctx.error ? `<div class="notice error" role="alert">${icon("alert", 19)}<div><p>${esc(ctx.error.message)}</p>
       <div class="actions">
-        ${ctx.error.code === "sign_in" && ctx.connection.google ? button("Войти", "user", "go", "profile", "primary") : ""}
+        ${ctx.error.code === "sign_in" && ctx.native ? button("Войти", "user", "go", "profile", "primary") : ""}
         ${button("Повторить", "refresh", "retry")}
       </div></div></div>` : "";
     return `<header class="chat-header">
@@ -176,8 +176,9 @@ const CortexUI = (() => {
           <div class="account-copy"><strong>${esc(account?.name || "Гостевой режим")}</strong>
             <p>${esc(account?.email || "Чаты и настройки на этом устройстве")}</p>
           </div>
-          ${!account && ctx.connection.google ? `<button type="button" class="action primary profile-signin" ${attributes("login")} ${ctx.login ? "disabled" : ""}>
-            <span class="google-letter" aria-hidden="true">G</span><span>${ctx.login ? "Ожидаю вход" : "Войти через Google"}</span></button>` : ""}
+          ${!account && ctx.native ? `<button type="button" class="action primary profile-signin" ${attributes("login")} ${ctx.login ? "disabled" : ""}>
+            <span class="google-letter" aria-hidden="true">G</span><span>${ctx.login ? "Ожидаю вход" : "Войти через Google"}</span></button>
+            ${ctx.connection.checked && !ctx.connection.google ? '<small class="muted">Вход через Google пока недоступен на сервере.</small>' : ""}` : ""}
         </section>
         ${group(tile("Настройки", "Голос, телефон и уведомления", "sliders", "go", "settings") +
           tile("Чаты и данные", "История, экспорт и заметки", "folder", "go", "data") +
@@ -190,7 +191,7 @@ const CortexUI = (() => {
   }
   function settings() {
     return detail("Настройки", "", group(
-      tile("Голос", "Диктовка, разговор и активация", "mic", "go", "voice") +
+      tile("Голос", "Озвучка, скачиваемые голоса и разговор", "mic", "go", "voice") +
       tile("Способ вызова CORTEX", "Островок, голос или без плавающего окна", "focus", "go", "phone-tools") +
       tile("Модели ИИ", "Бесплатные профили OpenRouter", "spark", "go", "models") +
       tile("Язык", "Язык ответа и распознавания", "globe", "go", "language") +
@@ -206,14 +207,51 @@ const CortexUI = (() => {
       ${switchRow("Тактильный отклик", "Лёгкий импульс при переходе, отправке и записи", p.haptics, "haptics")}
     </section>`);
   }
-  function voice() {
+  function voiceCatalog(catalog) {
+    const items = Array.isArray(catalog.items) ? catalog.items : [];
+    const active = catalog.selected || "android";
+    const locked = Boolean(catalog.downloading || catalog.removing || catalog.supported === false);
+    const formatSize = bytes => bytes >= 1000000 ? (bytes / 1000000).toLocaleString("ru-RU", {maximumFractionDigits: 1}) + " МБ"
+      : Math.max(1, Math.ceil(bytes / 1000)) + " КБ";
+    const selected = id => active === id ? '<span class="voice-selected">Выбран</span>'
+      : button("Выбрать", "check", "voice-select", id, "outline");
+    const row = (title, info, actions, progress = "") =>
+      `<article class="voice-pack"><div><h3>${esc(title)}</h3><p>${esc(info)}</p></div>
+        <div class="voice-pack-actions">${actions}</div>${progress}</article>`;
+    const preview = (name, id, locale = "") => M.state.preferences.voiceEnabled && active === id
+      ? iconButton("speaker", "Прослушать голос " + name, "voice-preview", id + "|" + locale, "voice-preview") : "";
+    const android = row("Голос Android", "Из системных настроек телефона", selected("android") + preview("Android", "android"));
+    const packs = items.map(item => {
+      const loading = catalog.downloading === item.id;
+      const installed = item.installed === true;
+      const actions = loading ? `<span class="voice-selected">${esc(catalog.stage || "Устанавливаю")}</span>`
+        : (installed ? selected(item.id) : "") + preview(item.title, item.id, item.language) +
+          (!installed || item.update ? `<button type="button" class="action primary" ${attributes("voice-install", item.id)}
+            ${locked ? "disabled" : ""}>${item.update ? "Обновить" : "Скачать"}</button>` : "") +
+          (installed ? `<button type="button" class="icon-btn voice-preview" ${attributes("voice-remove", item.id)}
+            aria-label="Удалить голос ${esc(item.title)}" ${locked ? "disabled" : ""}>${icon("trash", 17)}</button>` : "");
+      const size = item.size > 0 ? formatSize(item.size) : "";
+      const info = [item.description, size, installed ? "На устройстве" : ""].filter(Boolean).join(" · ");
+      return row(item.title, info, actions, loading
+        ? `<progress data-voice-progress max="100" value="${Number(catalog.progress) || 0}" aria-label="Загрузка голоса"></progress>` : "");
+    }).join("");
+    return `<section class="panel voice-catalog" aria-label="Каталог голосов">
+      <div class="voice-catalog-heading"><h2>Голос Кортекса</h2>${iconButton("refresh", "Обновить список", "voice-catalog")}</div>
+      ${catalog.loading ? '<p class="muted" role="status">Обновляю список…</p>' : ""}
+      ${catalog.supported === false ? '<p class="muted">Скачиваемые голоса требуют 64-битного Android.</p>' : ""}
+      ${catalog.offline ? '<p class="muted" role="status">Каталог недоступен. Можно использовать сохранённые голоса.</p>' : ""}
+      ${catalog.notice ? `<p class="voice-notice" role="status">${esc(catalog.notice)}</p>` : ""}
+      ${android}${packs}</section>`;
+  }
+
+  function voice(ctx) {
     const p = M.state.preferences;
-    return detail("Голос", "", `<section class="panel stack">
-      ${switchRow("Читать текстовые ответы вслух", "Использовать системный голос Android", p.readAloud, "readAloud")}
-      ${switchRow("Продолжать голосовой разговор", "Слушать следующий вопрос после озвучивания ответа", p.voiceContinue, "voiceContinue")}
-      <div class="capability-note"><span class="capability-signal" aria-hidden="true"><i></i><i></i><i></i></span><span>Обращение «Кортекс» вне приложения включается на экране «Вызов». Голосовой разговор внутри приложения — через кнопку рядом с полем ввода.</span></div>
-      <h2>Скорость речи</h2>${choices({"0.85": "Медленнее", "1": "Обычная", "1.15": "Быстрее"}, p.speechSpeed, "speech-speed")}
-    </section>`);
+    return detail("Голос", "", `<section class="panel stack voice-preferences">
+      ${switchRow("Озвучка Кортекса", "Голосовые ответы в чате и островке", p.voiceEnabled, "voiceEnabled")}
+      ${switchRow("Читать текстовые ответы вслух", "В том числе когда вопрос набран вручную", p.readAloud, "readAloud")}
+      ${switchRow("Продолжать голосовой разговор", "Слушать следующий вопрос после ответа", p.voiceContinue, "voiceContinue")}
+      <div class="voice-speed"><h2>Скорость речи</h2>${choices({"0.85": "Медленнее", "1": "Обычная", "1.15": "Быстрее"}, p.speechSpeed, "speech-speed")}</div>
+    </section>${ctx.native ? voiceCatalog(ctx.voices || {}) : '<p class="muted">Установка голосов доступна в приложении Android.</p>'}`);
   }
   function phoneTools(ctx) {
     const p = M.state.preferences;

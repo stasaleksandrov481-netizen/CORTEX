@@ -42,28 +42,15 @@ const CortexMotion = (() => {
     return clear;
   }
 
-  function wave(app, origin, direction = 1) {
-    const point = origin ? origin.y + origin.h / 2 : app.clientHeight;
-    const anchor = origin ? (origin.x + origin.w / 2) / app.clientWidth : .5;
-    return layer(app, 610, (ctx, p, w, h) => {
-      const columns = Math.round(Math.min(32, Math.max(20, w / 12)));
-      const center = lerp(point - h * .09, -h * .13, .8 * p + .2 * ease(p));
-      const life = smooth(.02, .24, p) * (1 - smooth(.57, 1, p));
-      ctx.fillStyle = "#fff";
-      for (let row = -4; row <= 4; row++) {
-        const depth = 1 - Math.abs(row) / 5;
-        for (let col = 0; col < columns; col++) {
-          const u = (col + .5) / columns;
-          const ripple = Math.sin(((u - anchor) * direction * 1.39 - p * .76 + row * .055) * tau);
-          const x = u * w + row * 2.1 * direction + ripple * 3;
-          const y = center + row * (h * .023 + 2) + ripple * (13 + depth * 17) + (u - .5) * direction * 65;
-          ctx.globalAlpha = life * depth * (.18 + .55 * (.5 + .5 * ripple));
-          ctx.beginPath();
-          ctx.arc(x, y, .62 + depth * (.58 + .62 * Math.abs(ripple)), 0, tau);
-          ctx.fill();
-        }
-      }
-    });
+  function dock(control) {
+    const icon = control?.querySelector(".nav-icon");
+    if (!icon?.animate) return;
+    icon.getAnimations().forEach(animation => animation.cancel());
+    icon.animate([
+      { transform: "translateY(2px) scale(.93)" },
+      { transform: "translateY(-3px) scale(1.10)", offset: .65 },
+      { transform: "translateY(-1px) scale(1.08)" }
+    ], { duration: 285, easing: "cubic-bezier(.18,.76,.23,1)" });
   }
 
   function core(app, from, to) {
@@ -130,12 +117,13 @@ const CortexMotion = (() => {
   }
 
   function page(surface, direction, tab) {
-    const offset = tab ? 13 * direction : 0;
+    const distance = tab ? 25 * direction : 0;
+    const axis = tab ? 4 : 12;
     return surface.animate([
-      { opacity: .18, transform: `translate3d(${offset}px,12px,0) scale(.987,1.012)` },
-      { opacity: .95, transform: `translate3d(${-.12 * offset}px,-2px,0) scale(1.003,.996)`, offset: .64 },
+      { opacity: .10, transform: `translate3d(${distance}px,${axis}px,0) scale(.991)` },
+      { opacity: .86, transform: `translate3d(${distance * .19}px,1px,0) scale(1)`, offset: .63 },
       { opacity: 1, transform: "none" }
-    ], { duration: tab ? 390 : 345, easing: "cubic-bezier(.24,.72,.24,1)" });
+    ], { duration: tab ? 315 : 260, easing: "cubic-bezier(.2,.69,.22,1)" });
   }
 
   const presses = new WeakMap();
@@ -151,5 +139,5 @@ const CortexMotion = (() => {
     ], { duration: 320, easing: "cubic-bezier(.18,.82,.25,1)" }));
   }
 
-  return { wave, core, page, press };
+  return { dock, core, page, press };
 })();

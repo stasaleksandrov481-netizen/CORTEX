@@ -14,7 +14,7 @@ const Cortex = (() => {
   const models = { auto: "Авто", fast: "Быстро", deep: "Подробно" };
   const defaults = {
     quality: "balanced", reduceMotion: false, autoSaveChats: true, rememberSaved: true,
-    language: "auto", haptics: true, readAloud: false, voiceContinue: true,
+    language: "auto", haptics: true, readAloud: false, voiceEnabled: true, voiceContinue: true,
     phoneActions: true, model: "auto", speechSpeed: "1", notifyReplies: false,
     overlayMode: "off", hideLandscape: true, hotwordEnabled: false, silentWake: false
   };

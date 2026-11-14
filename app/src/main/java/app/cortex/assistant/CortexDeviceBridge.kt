@@ -25,6 +25,9 @@ internal class CortexDeviceBridge(
     private val context get() = activity.applicationContext
     private val engineDelegate = lazy { CortexActionEngine(activity) }
     private val engine by engineDelegate
+    private val voices by lazy { VoiceStore.get(context) }
+    private var watchingVoices = false
+    private val voiceUpdates: (JSONObject) -> Unit = { emit(it) }
     private var pendingImage = false
     private var pendingExport: String? = null
 
@@ -73,6 +76,18 @@ internal class CortexDeviceBridge(
             }
             "voice-finish" -> speech.finish(body.optString("id"))
             "voice-cancel" -> speech.cancel(body.optString("id"))
+            "voice-catalog" -> {
+                if (!watchingVoices) { watchingVoices = true; voices.watch(voiceUpdates) }
+                voices.refresh(body.optBoolean("force"))
+            }
+            "voice-install" -> voices.install(body.optString("id"))
+            "voice-select" -> voices.select(body.optString("id"))
+            "voice-remove" -> voices.remove(body.optString("id"))
+            "voice-config" -> {
+                val enabled = body.optBoolean("enabled", true)
+                voices.configure(enabled, body.optBoolean("readText"), body.optDouble("speed", 1.0).toFloat())
+                if (!enabled) CortexVoiceOutput.silence()
+            }
             "speak" -> speech.speak(body.optString("id"), body.optString("text"),
                 body.optString("language", "ru-RU"), body.optDouble("speed", 1.0).toFloat())
             "silence" -> speech.silence(body.optString("id").takeIf { it.isNotBlank() })
@@ -120,6 +135,7 @@ internal class CortexDeviceBridge(
     }
 
     override fun close() {
+        if (watchingVoices) voices.unwatch(voiceUpdates)
         if (engineDelegate.isInitialized()) engine.close()
     }
 

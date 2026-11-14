@@ -43,16 +43,16 @@ internal class VisualTouchOverlay(context: Context) : AutoCloseable {
             if (distance > 0f) {
                 trail.rewind()
                 route.getSegment((distance - 120 * density).coerceAtLeast(0f), distance, trail, true)
-                paint.color = Color.rgb(176, 198, 240)
+                paint.color = Color.rgb(196, 196, 196)
                 paint.alpha = (47 * opacity).roundToInt()
                 paint.strokeWidth = 9f * density
                 canvas.drawPath(trail, paint)
-                paint.color = Color.rgb(229, 238, 255)
+                paint.color = Color.rgb(237, 237, 237)
                 paint.alpha = (202 * opacity).roundToInt()
                 paint.strokeWidth = 2f * density
                 canvas.drawPath(trail, paint)
             }
-            paint.color = Color.rgb(197, 214, 250)
+            paint.color = Color.rgb(213, 213, 213)
             paint.alpha = (151 * opacity).roundToInt()
             paint.strokeWidth = 1.24f * density
             canvas.drawCircle(x, y, (8f + 16f * fade) * density, paint)

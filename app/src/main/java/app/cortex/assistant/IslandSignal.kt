@@ -18,11 +18,11 @@ internal class IslandSignal(private val density: Float) {
 
     fun face(canvas: Canvas, x: Float, y: Float, phase: String, time: Float, alpha: Float) {
         val color = when (phase) {
-            "done" -> 0xFFCEEFDA.toInt()
-            "error" -> 0xFFFFC1CA.toInt()
-            "listening" -> 0xFFD0E9FF.toInt()
-            "executing" -> 0xFFE2DEFF.toInt()
-            else -> 0xFFF2F3FA.toInt()
+            "done" -> 0xFFE6E6E6.toInt()
+            "error" -> 0xFFCFCFCF.toInt()
+            "listening" -> 0xFFE5E5E5.toInt()
+            "executing" -> 0xFFE1E1E1.toInt()
+            else -> 0xFFF3F3F3.toInt()
         }
         canvas.save()
         canvas.translate(x, y)

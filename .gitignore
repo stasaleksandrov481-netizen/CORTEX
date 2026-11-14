@@ -10,3 +10,5 @@ app/build/
 *.p12
 .env
 .DS_Store
+
+/supabase/.temp/

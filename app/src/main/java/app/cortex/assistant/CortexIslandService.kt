@@ -170,6 +170,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
 
     private fun hideTemporarily() {
         hiddenByVoice = true
+        CortexVoiceOutput.silence(this)
         if (!busy) updateStatus("idle", "") else render()
     }
 
@@ -295,6 +296,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         val text = raw.trim().take(2400)
         if (handleControl(this, text) != null) return
         if (busy || actionBusy || text.isEmpty()) return
+        CortexVoiceOutput.silence(this)
         if (fromVoice) island?.conversation?.hideKeyboard()
         busy = true
         task = null
@@ -322,10 +324,17 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
                 busy = false
                 reply = answer.trim()
                 updateStatus(if (ok) "done" else "error", "")
+                val settings = VoiceStore.get(this)
+                if (ok && !hiddenByVoice && !CortexRuntime.appVisible && (fromVoice || settings.readText)) {
+                    val spoken = reply.replace(Regex("```[\\s\\S]*?```"), " ").replace(Regex("[*`#]"), "").trim()
+                    val locale = if (spoken.any { it in 'а'..'я' || it in 'А'..'Я' || it == 'ё' || it == 'Ё' }) "ru-RU" else "en-US"
+                    CortexVoiceOutput.speak(this, this, "island", spoken, locale, settings.speed)
+                }
             })
     }
 
     private fun stopAnswer() {
+        CortexVoiceOutput.silence(this)
         if (!busy) { if (actionBusy) CortexActionState.stop(); return }
         assistant.cancel()
         busy = false
@@ -484,6 +493,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     override fun onDisplayRemoved(displayId: Int) = Unit
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() {
+        CortexVoiceOutput.silence(this)
         if (CortexActionState.listener === actionStatus) CortexActionState.listener = null
         if (CortexRuntime.islandVisibility === visibilityChanged) CortexRuntime.islandVisibility = null
         if (CortexRuntime.wakeLevel === wakeLevel) CortexRuntime.wakeLevel = null

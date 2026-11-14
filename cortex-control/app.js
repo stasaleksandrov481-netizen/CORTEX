@@ -9,12 +9,12 @@ const feedback = document.querySelector("#feedback");
 const redirectTo = "https://cortex-control-phi.vercel.app/";
 const labels = {
   overview: "Обзор", support: "Обращения", updates: "Версии", maintenance: "Техработы",
-  roles: "Доступы", audit: "Журнал"
+  voices: "Голоса", roles: "Доступы", audit: "Журнал"
 };
 const ticketStates = { open: "Открыто", in_progress: "В работе", answered: "Есть ответ", closed: "Закрыто" };
 const roles = { owner: "Владелец", admin: "Разработчик", support: "Поддержка" };
 const categories = { contact: "Вопрос", bug: "Ошибка", idea: "Идея", complaint: "Жалоба" };
-let user, role, factor, enrollment, ticket, tab = "overview";
+let user, role, factor, enrollment, ticket, selectedVoice, tab = "overview";
 let renderVersion = 0, feedbackTimer;
 
 const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({
@@ -93,7 +93,7 @@ async function initialize() {
   const previous = user?.id;
   user = data(await db.auth.getUser()).user;
   if (!user) { signIn(); return; }
-  if (previous !== user.id) { factor = enrollment = ticket = null; }
+  if (previous !== user.id) { factor = enrollment = ticket = selectedVoice = null; }
   const assurance = data(await db.auth.mfa.getAuthenticatorAssuranceLevel());
   if (assurance.currentLevel !== "aal2") {
     const factors = data(await db.auth.mfa.listFactors());
@@ -117,7 +117,7 @@ async function initialize() {
 
 function allowedTabs() {
   if (role === "owner") return Object.keys(labels);
-  if (role === "admin") return ["overview", "support", "updates", "maintenance", "audit"];
+  if (role === "admin") return ["overview", "support", "updates", "voices", "maintenance", "audit"];
   return ["overview", "support"];
 }
 
@@ -224,6 +224,76 @@ async function updates() {
       '<label>Заметка<textarea name="notes" rows="2" maxlength="600"></textarea></label>', "Добавить версию"));
 }
 
+const voiceKinds = { "ruvoice-preset": "Экспорт RuVoice (.json)", zip: "Пакет CORTEX (.zip)" };
+const voiceColumns = "id,title,description,kind,version,url,size_bytes,sha256,published";
+const voiceTable = () => db.from("cortex_voice_packs");
+
+async function githubVoiceAsset(value) {
+  const url = new URL(value);
+  const match = /^\/([\w.-]+)\/([\w.-]+)\/releases\/download\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+  if (url.origin !== "https://github.com" || url.username || url.password || url.search || url.hash || !match) {
+    throw new Error("Скопируйте прямую ссылку на файл из публичного GitHub Release.");
+  }
+  const [, owner, repo, tag, filename] = match;
+  const path = "https://api.github.com/repos/" + owner + "/" + repo + "/releases/tags/" +
+    encodeURIComponent(decodeURIComponent(tag));
+  const response = await fetch(path, {
+    headers: { Accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(12000)
+  });
+  if (!response.ok) throw new Error(response.status === 403 || response.status === 429 ?
+    "GitHub ограничил запросы. Попробуйте через несколько минут." : "Релиз недоступен. Проверьте, что он опубликован и открыт.");
+  const release = await response.json();
+  const asset = release.assets?.find(item => item.name === decodeURIComponent(filename));
+  const hash = asset?.digest?.match(/^sha256:([a-f0-9]{64})$/)?.[1];
+  if (!asset || asset.state !== "uploaded" || !hash || asset.size <= 0 || asset.size > 170000000) {
+    throw new Error("Проверьте файл в релизе. Нужны SHA-256 от GitHub и размер до 170 МБ.");
+  }
+  return { url: asset.browser_download_url, sha256: hash, size_bytes: asset.size };
+}
+
+async function voices() {
+  const packs = data(await voiceTable().select(voiceColumns).order("title").limit(100)) || [];
+  const voice = packs.find(item => item.id === selectedVoice);
+  const cards = packs.map(item => '<li><div><strong>' + escape(item.title) + '</strong><p>' +
+    escape(voiceKinds[item.kind]) + ' · версия ' + escape(item.version) + ' · ' +
+    (item.published ? 'В каталоге' : 'Скрыт') + '</p></div><div class="actions">' +
+    button("Изменить", "voice-edit", item.id) +
+    button(item.published ? "Скрыть" : "Опубликовать", item.published ? "voice-hide" : "voice-show", item.id) + '</div></li>').join("");
+  const editor = form("voice", '<p class="muted">Загрузите JSON или ZIP в Assets публичного GitHub Release и вставьте прямую ссылку. Панель получит размер и SHA-256 из GitHub.</p>' +
+    field("id", "Идентификатор", "text", voice?.id, 'pattern="[a-z0-9][a-z0-9-]{1,47}" maxlength="48" required' + (voice ? " readonly" : "")) +
+    field("title", "Название в приложении", "text", voice?.title, 'maxlength="80" required') +
+    field("description", "Описание", "text", voice?.description, 'maxlength="220"') +
+    '<label>Формат<select name="kind">' + options(voiceKinds, voice?.kind) + '</select></label>' +
+    field("url", "Ссылка на файл GitHub Release", "url", voice?.url, 'maxlength="1400" required') +
+    '<label class="check"><input name="published" type="checkbox"' + checked(voice?.published ?? true) + '>Показать в каталоге CORTEX</label>', voice ? "Сохранить" : "Добавить голос");
+  return card(voice ? "Редактирование голоса" : "Добавить голос", editor + (voice ? button("Новый голос", "voice-edit") : "")) +
+    card("Каталог", cards ? '<ul class="record-list">' + cards + '</ul>' : '<p class="muted">Добавленные голоса появятся здесь.</p>');
+}
+
+async function saveVoice(target, read, formData) {
+  if (role !== "owner" && role !== "admin") return;
+  const id = read("id"), kind = read("kind");
+  if (!/^[a-z0-9][a-z0-9-]{1,47}$/.test(id) || !Object.hasOwn(voiceKinds, kind) || !read("title")) {
+    throw new Error("Проверьте название, идентификатор и формат.");
+  }
+  const asset = await githubVoiceAsset(read("url"));
+  const expected = kind === "ruvoice-preset" ? ".json" : ".zip";
+  if (!new URL(asset.url).pathname.toLowerCase().endsWith(expected) || kind === "ruvoice-preset" && asset.size_bytes > 1500000) {
+    throw new Error("Проверьте расширение файла и размер экспорта RuVoice.");
+  }
+  const current = data(await voiceTable().select("version,kind,sha256").eq("id", id).maybeSingle());
+  if (!target.elements.id.readOnly && current) throw new Error("Такой идентификатор уже есть. Откройте голос кнопкой «Изменить».");
+  const payload = {
+    id, kind, ...asset, title: read("title"), description: read("description"),
+    version: current ? current.version + Number(current.sha256 !== asset.sha256 || current.kind !== kind) : 1,
+    published: formData.has("published")
+  };
+  const change = current ? voiceTable().update(payload).eq("id", id).eq("version", current.version)
+    : voiceTable().insert(payload);
+  data(await change.select("id").single());
+  selectedVoice = null;
+}
+
 async function access() {
   const grants = data(await db.rpc("cortex_list_admin_roles")) || [];
   return card("Роли", '<ul class="record-list">' + grants.map(grant => '<li><span>' + escape(grant.email || grant.user_id) +
@@ -239,7 +309,7 @@ async function audit() {
     escape(event.event) + ' · ' + escape(event.target) + '</span><small>' + date(event.created_at) + '</small></li>').join("") + '</ul>');
 }
 
-const views = { overview, support, maintenance, updates, roles: access, audit };
+const views = { overview, support, maintenance, updates, voices, roles: access, audit };
 
 async function saveConfig(values) {
   data(await db.from("cortex_control_config").update({ ...values, updated_at: new Date().toISOString() })
@@ -277,6 +347,13 @@ app.addEventListener("click", async event => {
         control.setAttribute("aria-expanded", "true");
         break;
       case "close-menu": document.querySelector("#mobile-nav")?.close(); break;
+      case "voice-edit": selectedVoice = value; await loadTab(); break;
+      case "voice-show":
+      case "voice-hide":
+        if (role !== "owner" && role !== "admin") break;
+        data(await voiceTable().update({ published: action === "voice-show" }).eq("id", value).select("id").single());
+        await loadTab();
+        break;
       case "allow-version":
       case "block-version":
         if (role !== "owner" && role !== "admin") break;
@@ -349,6 +426,9 @@ app.addEventListener("submit", async event => {
       case "update-policy":
         if ((formData.has("enabled") || read("url")) && !/^https:\/\//.test(read("url"))) throw new Error("Укажите HTTPS-ссылку на обновление.");
         await saveConfig({ block_old_versions: formData.has("enabled"), min_version_code: Number(read("code")), update_url: read("url") });
+        break;
+      case "voice":
+        await saveVoice(target, read, formData);
         break;
       case "release":
         data(await db.from("cortex_release_versions").insert({

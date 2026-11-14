@@ -20,11 +20,12 @@
   const drafts = new Map(), errors = new Map(), ruleDrafts = new Map(), actionReplies = new Map();
   const filters = { search: "", onlySaved: false };
   const connection = { google: false, profiles: false, checked: false, visualPrivacy: false };
+  let voiceCatalog = {};
   let wakeState = "", islandCamera = "drop";
   const permissions = { microphone: false, notifications: false, overlay: false, screenLock: false, screenLockSupported: false, brightness: false, verifyApps: false, screenAutomation: false, assistant: false, assistantSupported: false };
   let route = "home", chatId = "", rule = "goal";
   let pending, login, voice, readoutId, activeSheet, ghost, pageMotion, composerMotion, headingMotion, clearMorph, screenContext, drawerExit, sheetExit, inlineToast, toastTimer;
-  let connectionLoad;
+  let connectionLoad, loginCleanup;
   let keyboardBaseline = 0, keyboardObserved = false, historySearchTimer = 0;
   let statusEpoch = 0, splashFrame = 0, splashTimer = 0, splashPrevious = null;
 
@@ -45,8 +46,9 @@
   const reduced = () => S.preferences.reduceMotion || systemMotion.matches;
   const current = () => M.chat(chatId);
   const draftKey = () => route === "chat" ? chatId : "home";
-  const waveMode = () => pending && pending.chatId === chatId ? "thinking" :
-    document.activeElement === input ? "focus" : "idle";
+  const waveMode = () => voice?.phase === "speaking" ? "speaking" :
+    ["listening", "hearing"].includes(voice?.phase) ? "voice" :
+    pending && pending.chatId === chatId ? "thinking" : document.activeElement === input ? "focus" : "idle";
   const language = () => S.preferences.language === "en-US" ? "en-US" : "ru-RU";
 
   function appearance() {
@@ -68,6 +70,11 @@
     if (!receiver) return false;
     try { receiver.postMessage(JSON.stringify({ operation, ...data })); return true; }
     catch { return false; }
+  }
+
+  function syncVoiceOptions() {
+    sendDevice("voice-config", { enabled: S.preferences.voiceEnabled, readText: S.preferences.readAloud,
+      speed: Number(S.preferences.speechSpeed) });
   }
 
   function syncIslandOptions() {
@@ -170,7 +177,7 @@
     screen.dataset.chat = route === "chat" ? chatId : "";
     screen.className = "screen " + route + "-screen";
     screen.innerHTML = U.page(route, {
-      connection, permissions, wakeState, islandCamera, native: Boolean(device), login, chat: current(), messageEnter,
+      connection, permissions, voices: voiceCatalog, wakeState, islandCamera, native: Boolean(device), login, chat: current(), messageEnter,
       pending: route === "chat" && pending?.chatId === chatId ? pending : null,
       error: route === "chat" ? errors.get(chatId) : null,
       rule, ruleDraft: ruleDrafts.get(rule)
@@ -204,7 +211,7 @@
     ghost = null;
   }
 
-  function fadeOldPage(duration, leavingHome = false) {
+  function fadeOldPage(duration, leavingHome, direction = 0) {
     const r = localRect(screen.getBoundingClientRect());
     const old = screen.cloneNode(true);
     old.removeAttribute("id");
@@ -220,8 +227,9 @@
     if (prevScroll) old.querySelector(".scroll").scrollTop = prevScroll.scrollTop;
     ghost = old;
     const remove = () => { old.remove(); if (ghost === old) ghost = null; };
-    old.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translate3d(0,-4px,0)" }],
-      { duration: Wave.duration(duration), easing: "cubic-bezier(.27,.68,.22,1)", fill: "forwards" }).finished.then(remove, remove);
+    old.animate([{ opacity: 1, transform: "none" },
+      { opacity: 0, transform: `translate3d(${-direction * 16}px,-4px,0) scale(.991)` }],
+      { duration, easing: "cubic-bezier(.24,.62,.24,1)", fill: "forwards" }).finished.then(remove, remove);
   }
 
   const box = node => node ? localRect(node.getBoundingClientRect()) : null;
@@ -262,7 +270,7 @@
     closeHistory(true);
     clearVisuals();
     const before = !composition.hidden ? box(form) : null;
-    const source = box(cinematic ? dockCore() : origin);
+    const source = cinematic ? box(dockCore()) : null;
     const tabDirection = U.tabs.findIndex(([key]) => key === rootTab(next)) >=
       U.tabs.findIndex(([key]) => key === rootTab(previous)) ? 1 : -1;
     const title = box(screen.querySelector(".hero-copy h1"));
@@ -273,7 +281,7 @@
     const intoHome = next === "home";
     const switchesTab = rootTab(previous) !== rootTab(next);
     if (animated && (route !== "chat" || (current()?.messages.length || 0) < 40)) {
-      fadeOldPage(switchesTab ? 165 : 130, intoChat);
+      fadeOldPage(switchesTab ? 230 : 168, intoChat, switchesTab ? tabDirection : 0);
     }
     route = next;
     if (next === "chat") chatId = id;
@@ -293,13 +301,14 @@
       }
       pageMotion = Motion.page(screen, tabDirection, switchesTab);
       if (cinematic) playCore(source);
-      else if (switchesTab) clearMorph = Motion.wave(app, source, tabDirection);
+      if (switchesTab) Motion.dock(nav.querySelector("[aria-current=page]"));
       if (newChat && origin) {
         const point = box(origin);
         Wave.pulse(point.x + point.w / 2, point.y + point.h / 2);
       }
     }
     if (permissionsPage()) sendDevice("permissions");
+    if (route === "voice") sendDevice("voice-catalog");
   }
 
   function readRoute() {
@@ -323,6 +332,7 @@
       if (switchesTab) clearMorph = Motion.wave(app, null, -1);
     }
     if (permissionsPage()) sendDevice("permissions");
+    if (route === "voice") sendDevice("voice-catalog");
   }
 
   function back() {
@@ -539,7 +549,7 @@
     if (!login) return;
     clearTimeout(login.timer);
     login = null;
-    Api.request("auth-cancel").catch(() => {});
+    loginCleanup = Api.request("auth-cancel").catch(() => {});
     if (route === "profile") render();
   }
 
@@ -564,7 +574,7 @@
 
   async function pollLogin() {
     const attempt = login;
-    if (!attempt || attempt.busy || document.hidden) return;
+    if (!attempt || attempt.busy || !appVisible()) return;
     if (Date.now() >= attempt.expires) {
       stopLogin();
       closeSheet();
@@ -606,18 +616,17 @@
   async function startLogin() {
     if (login) return;
     if (!Api.available || !device) { flash(Api.failure(Api.android ? "webview" : "preview").message); return; }
-    if (!connection.checked && connectionLoad) await Promise.race([connectionLoad, wait(2000)]);
-    if (connection.checked && !connection.google) { flash(Api.failure("account_config").message); return; }
     const attempt = { busy: true, expires: Infinity, timer: 0 };
     login = attempt;
     render();
     try {
+      await loginCleanup;
       const result = await Api.request("auth-start");
       if (login !== attempt) return;
       attempt.expires = Date.now() + 1000 * (result.expires_in || 300);
       attempt.busy = false;
       showLogin(attempt);
-      if (!sendDevice("open-login", { url: result.url })) updateLogin("Не удалось открыть браузер.");
+      if (!sendDevice("open-login", { url: result.url })) loginBrowserFailed();
     } catch (error) {
       if (login === attempt) {
         login = null;
@@ -625,6 +634,13 @@
         flash(error.message);
       }
     }
+  }
+
+  function loginBrowserFailed() {
+    if (!login) return;
+    stopLogin();
+    closeSheet();
+    flash("Не удалось открыть браузер Android.");
   }
 
   window.cortexAdminLogin = startLogin;
@@ -660,9 +676,10 @@
     updateJumpLatest();
   }
 
-  function speak(text, id) {
+  function speak(text, id, preferredLocale) {
+    if (!S.preferences.voiceEnabled) return false;
     if (!id) id = readoutId = M.id("speech");
-    const locale = S.preferences.language === "auto" && !/[а-яё]/iu.test(text) ? "en-US" : language();
+    const locale = preferredLocale || (S.preferences.language === "auto" && /[a-z]/iu.test(text) && !/[а-яё]/iu.test(text) ? "en-US" : language());
     return sendDevice("speak", {
       id, language: locale, speed: Number(S.preferences.speechSpeed),
       text: Markdown.spoken(text, locale === "en-US" ? "The answer is available in the chat." : "Ответ доступен в чате.")
@@ -984,6 +1001,7 @@
     if (!voice) return;
     voice.phase = phase;
     voicePanel.dataset.voicePhase = phase;
+    Wave.state(waveMode());
     voicePanel.querySelector("[data-voice-status]").textContent = text;
     const labels = { starting: "Включаю микрофон", listening: "Завершить запись", hearing: "Завершить запись",
       recognizing: "Распознаю речь", thinking: "Перебить", opening: "Выполняю действие", preparing: "Перебить",
@@ -1005,6 +1023,7 @@
     if (job.speech) sendDevice("silence", { id: job.speech });
     voicePanel.hidden = true;
     delete voicePanel.dataset.voicePhase;
+    Wave.state(waveMode());
     transcript("");
     syncComposer();
   }
@@ -1064,6 +1083,7 @@
 
   function speakInConversation(job, text) {
     if (!appVisible()) { voiceStatus("waiting", "Ответ готов в чате"); return; }
+    if (!S.preferences.voiceEnabled) { conversationSpeech(job, "muted"); return; }
     job.speech = M.id("speech");
     voiceStatus("preparing", "Готовлю озвучивание…");
     if (!speak(text, job.speech)) { voiceStatus("error", "Озвучивание недоступно."); return; }
@@ -1072,8 +1092,8 @@
       if (voice !== job || job.phase !== "preparing") return;
       sendDevice("silence", { id: job.speech });
       job.speech = null;
-      voiceStatus("error", "Голос Android не начал озвучивание.");
-    }, 12000);
+      voiceStatus("error", "Не удалось начать озвучивание.");
+    }, 44000);
   }
 
   function finishDictation(job, text) {
@@ -1097,7 +1117,9 @@
       case "hearing": voiceStatus("hearing", "Слышу вас"); break;
       case "level":
         if (job.phase === "listening" || job.phase === "hearing") {
-          voicePanel.style.setProperty("--voice-level", String(Math.max(0, Math.min(1, Number(message.level) || 0))));
+          const level = Math.max(0, Math.min(1, Number(message.level) || 0));
+          voicePanel.style.setProperty("--voice-level", String(level));
+          Wave.state("voice", level);
         }
         break;
       case "partial": transcript(message.text); syncComposer(); break;
@@ -1130,13 +1152,13 @@
     clearTimeout(job.timer);
     if (phase === "started") { voiceStatus("speaking", "Говорю"); return; }
     job.speech = null;
-    if (phase === "done") {
+    if (phase === "done" || phase === "muted") {
       if (S.preferences.voiceContinue && appVisible()) {
         voiceStatus("waiting", "Включаю микрофон…");
         job.timer = setTimeout(() => listen(job), 420);
       } else voiceStatus("waiting", "Нажмите микрофон, чтобы продолжить");
     } else if (phase === "stopped") voiceStatus("waiting", "Озвучивание остановлено");
-    else voiceStatus("error", "Голос Android недоступен. Ответ есть в чате.");
+    else voiceStatus("error", "Не удалось озвучить ответ. Он доступен в чате.");
   }
 
   function deviceEvent(event) {
@@ -1145,11 +1167,21 @@
     if (message.type === "voice" && voice?.recognition && message.id === voice.recognition) {
       recognitionEvent(voice, message);
     }
+    if (message.type === "voice-catalog") {
+      const bar = screen.querySelector("[data-voice-progress]");
+      const progressOnly = message.downloading && message.downloading === voiceCatalog.downloading &&
+        message.loading === voiceCatalog.loading && message.offline === voiceCatalog.offline && message.stage === voiceCatalog.stage;
+      voiceCatalog = message;
+      if (route === "voice") {
+        if (progressOnly && bar) bar.value = message.progress;
+        else render();
+      }
+    }
     if (message.type === "speech") {
       if (voice?.speech && message.id === voice.speech) conversationSpeech(voice, message.phase);
       else if (readoutId && message.id === readoutId && message.phase !== "started") {
         readoutId = null;
-        if (message.phase === "error") flash("Голос недоступен в настройках Android.");
+        if (message.phase === "error") flash("Не удалось озвучить текст. Проверьте выбранный голос.");
       }
     }
     if (message.type === "action") actionReplies.get(message.id)?.(message);
@@ -1197,7 +1229,11 @@
     if (message.type === "overlay-mode" && !message.ok) {
       flash(message.message || "Разрешите отображение поверх приложений.");
     }
-    if (message.type === "browser" && !message.ok) updateLogin("Не удалось открыть браузер Android.");
+    if (message.type === "browser" && !message.ok) loginBrowserFailed();
+    if (message.type === "auth-tab-closed" && login) {
+      updateLogin("Окно входа закрыто. Проверяю, завершился ли вход…");
+      pollLogin();
+    }
     if (message.type === "auth-return") { if (login) pollLogin(); else restoreLogin(); }
     if (message.type === "copy") flash(message.ok ? "Скопировано" : "Не удалось скопировать");
     if (message.type === "link" && !message.ok) flash("Не удалось открыть ссылку.");
@@ -1223,6 +1259,7 @@
     saved();
     appearance();
     if (["model", "phoneActions", "reduceMotion", "haptics"].includes(key)) syncIslandOptions();
+    if (["voiceEnabled", "readAloud", "speechSpeed"].includes(key)) syncVoiceOptions();
     render();
   }
 
@@ -1280,7 +1317,7 @@
       sendDevice("silence");
       drafts.clear(); errors.clear(); ruleDrafts.clear();
       chatId = ""; rule = "goal";
-      appearance(); render(); flash("Локальные данные сброшены");
+      appearance(); syncVoiceOptions(); render(); flash("Локальные данные сброшены");
     }),
     stop: () => stopAnswer(),
     retry() {
@@ -1291,7 +1328,7 @@
     "copy-code"(_, control) { return copyText(control.closest(".code-block")?.querySelector("code")?.textContent); },
     speak(index) {
       const text = current()?.messages[Number(index)]?.text;
-      if (text) speak(text);
+      if (text && !speak(text)) flash(S.preferences.voiceEnabled ? "Озвучка доступна в Android." : "Озвучка выключена в настройках.");
     },
     dictate: (_, control) => startVoice(true, control),
     "voice-chat": (_, control) => startVoice(false, control),
@@ -1368,6 +1405,20 @@
     },
     quality(value) { if (Object.hasOwn(M.motion, value)) preference("quality", value); },
     language(value) { if (Object.hasOwn(M.languages, value)) preference("language", value); },
+    "voice-catalog": () => sendDevice("voice-catalog", { force: true }),
+    "voice-install": id => sendDevice("voice-install", { id }),
+    "voice-select": id => sendDevice("voice-select", { id }),
+    "voice-remove": id => confirm("Удалить голос?", "Файлы голоса будут удалены с устройства.", () => {
+      closeSheet();
+      sendDevice("voice-remove", { id });
+    }),
+    "voice-preview"(value) {
+      const [id, tag] = value.split("|");
+      if (id !== voiceCatalog.selected && !(id === "android" && !voiceCatalog.selected)) return;
+      const locale = tag || language();
+      const sample = locale.startsWith("ru") ? "Привет. Это Кортекс. Как я могу помочь?" : locale.startsWith("en") ? "Hello. This is Cortex. How can I help?" : "1, 2, 3.";
+      speak(sample, undefined, locale);
+    },
     "speech-speed"(value) { if (["0.85", "1", "1.15"].includes(value)) preference("speechSpeed", value); },
     toggle(key) {
       if (key === "hotwordEnabled" && !window.CortexIslandControl) {
@@ -1526,6 +1577,8 @@
     sendDevice("wake-config", { enabled: true, restore: true });
   }
   sendDevice("screen-context");
+  syncVoiceOptions();
+  if (route === "voice") sendDevice("voice-catalog");
   connectionLoad = refreshConnection();
   restoreLogin();
 })();
