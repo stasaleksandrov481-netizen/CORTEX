@@ -37,7 +37,7 @@ internal data class VisualFrame(
     val scrollRevision: Long = 0L,
     val scrollAxis: VisualScrollAxis? = null
 ) {
-    val tree get() = nodes.filterNot(VisualNode::ocr)
+    val tree by lazy(LazyThreadSafetyMode.NONE) { nodes.filterNot(VisualNode::ocr) }
 
     fun target(label: String, accepts: (VisualNode) -> Boolean = { true }): VisualNode? {
         val byId = nodes.firstOrNull { "#" + it.id == label && accepts(it) && it.enabled }
@@ -56,24 +56,24 @@ internal data class VisualFrame(
     fun has(label: String) = nodes.any { VisualLabels.score(it.label, label) >= 82 ||
         VisualLabels.score(it.description, label) >= 82 }
 
-    fun structure(): Int = tree.map { node ->
+    private val structuralSignature by lazy(LazyThreadSafetyMode.NONE) { tree.map { node ->
         listOf(node.path, node.label, node.role, node.resource, node.bounds, node.checked,
             node.focused, node.selected, node.state, node.enabled, node.editable, node.clickable, node.scrollable)
-    }.hashCode()
+    }.hashCode() }
 
-    fun modelData(): JSONObject = JSONObject().put("package", pkg).put("elements", JSONArray(nodes.filter {
-        it.label.isNotBlank() || it.clickable || it.editable || it.scrollable
-    }.take(125).map { node ->
-        JSONObject().put("id", "#" + node.id).put("label", VisualLabels.forModel(node.label))
+    fun structure(): Int = structuralSignature
+
+    fun modelData(includeReading: Boolean = false): JSONObject = JSONObject().put("package", pkg).put("elements", JSONArray(nodes.filter {
+        if (it.editable || it.clickable || it.scrollable || it.checked != null) true
+        else includeReading && it.label.isNotBlank()
+    }.sortedByDescending { it.editable || it.clickable || it.checked != null }.take(if (includeReading) 55 else 22).map { node ->
+        val resource = node.resource.substringAfterLast('/')
+        val label = if (node.editable) node.description.ifBlank { resource } else node.label
+        JSONObject().put("id", "#" + node.id).put("label", VisualLabels.forModel(label).take(150))
             .put("role", node.role).apply {
-                if (node.description.isNotBlank()) put("description", VisualLabels.forModel(node.description))
-                if (node.resource.isNotBlank()) put("resource", node.resource.substringAfterLast('/'))
+                if (resource.isNotBlank()) put("resource", resource.take(80))
                 if (node.checked != null) put("checked", node.checked)
-                if (node.state.isNotBlank()) put("state", VisualLabels.forModel(node.state))
-                if (node.focused) put("focused", true)
-                if (node.selected) put("selected", true)
                 if (!node.enabled) put("disabled", true)
-                if (node.ocr) put("ocr", true)
             }.put("actions", JSONArray(buildList {
                 if (node.clickable || node.ocr) add("tap")
                 if (node.editable) add("type")

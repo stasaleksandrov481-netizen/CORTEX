@@ -13,12 +13,20 @@ internal data class VisualApp(val label: String, val pkg: String)
 
 internal class VisualNavigation(context: Context, private val service: CortexScreenService) {
     private val manager = context.packageManager
-    val home = service.homePackages()
-    val apps: List<VisualApp> = manager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
+    private val context = context.applicationContext
+    val home by lazy(service::homePackages)
+    val apps: List<VisualApp> by lazy { manager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
         .map { VisualApp(it.loadLabel(manager).toString(), it.activityInfo.packageName) }.distinctBy { it.pkg }
-        .filterNot { it.pkg == context.packageName }
+        .filterNot { it.pkg == context.packageName } }
+    private val resolutions = mutableMapOf<String, VisualApp?>()
 
     fun resolve(target: String): VisualApp? {
+        if (target.isBlank()) return null
+        if (!resolutions.containsKey(target)) resolutions[target] = resolveInstalled(target)
+        return resolutions[target]
+    }
+
+    private fun resolveInstalled(target: String): VisualApp? {
         apps.singleOrNull { it.pkg.equals(target.trim(), true) }?.let { return it }
         val normalized = VisualLabels.normalize(target)
         apps.singleOrNull { normalized == VisualLabels.normalize(it.label) }?.let { return it }
@@ -33,11 +41,20 @@ internal class VisualNavigation(context: Context, private val service: CortexScr
         return VisualApp(info.loadLabel(manager).toString(), info.activityInfo.packageName)
     }
 
-    suspend fun open(app: VisualApp, report: (String) -> Unit): Boolean {
+    suspend fun open(app: VisualApp, report: (String) -> Unit, visual: Boolean = false): Boolean {
+        if (service.activePackage() == app.pkg) return true
+        if (!visual) {
+            val intent = manager.getLaunchIntentForPackage(app.pkg)
+                ?: Intent(android.provider.Settings.ACTION_SETTINGS).setPackage(app.pkg)
+                    .takeIf { VisualLabels.normalize(app.label) in SETTINGS_NAMES }
+            if (intent != null) {
+                report("Открываю «${app.label}»…")
+                if (launch(intent)) return await(3_500L) { it.pkg == app.pkg } != null
+            }
+        }
         if (home.isEmpty()) return false
         report("Перехожу на рабочий стол…")
         if (!service.global(AccessibilityService.GLOBAL_ACTION_HOME)) return false
-        delay(220L)
         val initial = await(7_000L, ::isLauncher) ?: return false
         report("Ищу «${app.label}» на рабочем столе…")
         appIcon(initial, app)?.let { if (launchIcon(initial, it, app, report)) return true }
@@ -203,19 +220,31 @@ internal class VisualNavigation(context: Context, private val service: CortexScr
         return null
     }
 
+    fun isActive(frame: VisualFrame): Boolean = service.frame(fresh = true)?.let {
+        it.pkg == frame.pkg && it.window == frame.window && it.structure() == frame.structure() &&
+            !it.secure && !it.hasPrivateFields
+    } == true
+
+    fun launch(intent: Intent): Boolean = runCatching {
+        context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        true
+    }.getOrDefault(false)
+
     suspend fun await(timeout: Long = 4_500L, accept: (VisualFrame) -> Boolean): VisualFrame? {
         val deadline = SystemClock.uptimeMillis() + timeout
         do {
             val frame = service.frame()
             if (frame != null && accept(frame)) return frame
-            delay(220L)
+            val remaining = deadline - SystemClock.uptimeMillis()
+            if (remaining <= 0) break
+            if (frame == null) delay(minOf(remaining, 75L))
+            else service.waitForScreenChange(frame.revision, minOf(remaining, 120L))
         } while (SystemClock.uptimeMillis() < deadline)
         return null
     }
 
     suspend fun after(before: VisualFrame, scrolled: Boolean = false): VisualFrame? {
         val beforeStructure = before.structure()
-        delay(240L)
         return await {
             it.pkg != before.pkg || it.window != before.window || it.structure() != beforeStructure ||
                 (scrolled && it.scrollRevision > before.scrollRevision)

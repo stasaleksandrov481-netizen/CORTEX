@@ -41,7 +41,8 @@ class CortexWakeService : Service() {
     private val turn = CortexWakeTurn(
         listening = { CortexIslandService.send(this, CortexIslandService.ACTION_WAKE) },
         finished = { command ->
-            if (CortexIslandService.handleControl(this, command) == null) {
+            if (CortexIslandService.handleControl(this, command) == null &&
+                CortexRuntime.wakeCommand?.invoke(command) != true) {
                 CortexIslandService.send(this, CortexIslandService.ACTION_SUBMIT) {
                     putExtra(CortexIslandService.EXTRA_MESSAGE, command)
                 }
@@ -96,18 +97,18 @@ class CortexWakeService : Service() {
     }
 
     private fun updateAudio() {
-        if (CortexRuntime.audioBusy) {
+        if (CortexRuntime.recording) {
             ui.removeCallbacks(rearm)
             ui.removeCallbacks(expire)
             turn.reset()
             closeFeed()
             destroyRecognizer()
-            CortexRuntime.reportWake("Пауза на время диктовки или озвучивания.")
+            CortexRuntime.reportWake("Пауза на время голосового ввода в приложении.")
         } else schedule(110)
     }
 
     private fun listen() {
-        if (!enabled || CortexRuntime.audioBusy || running || checkingLanguage || Build.VERSION.SDK_INT < 31) return
+        if (!enabled || CortexRuntime.recording || running || checkingLanguage || Build.VERSION.SDK_INT < 31) return
         if (!Settings.canDrawOverlays(this) || checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             CortexRuntime.reportWake("Разрешите показ островка и доступ к микрофону.")
             stopSelf()
@@ -199,7 +200,7 @@ class CortexWakeService : Service() {
     }
 
     private fun listener(ticket: Int, useStream: Boolean) = object : RecognitionListener {
-        private fun current() = enabled && running && ticket == generation && !CortexRuntime.audioBusy
+        private fun current() = enabled && running && ticket == generation && !CortexRuntime.recording
 
         override fun onReadyForSpeech(params: Bundle?) {
             if (current()) CortexRuntime.reportWake("Слушаю слово «Кортекс».")
@@ -308,7 +309,7 @@ class CortexWakeService : Service() {
 
     private fun schedule(delay: Long) {
         ui.removeCallbacks(rearm)
-        if (enabled && !CortexRuntime.audioBusy) ui.postDelayed(rearm, delay)
+        if (enabled && !CortexRuntime.recording) ui.postDelayed(rearm, delay)
     }
 
     private fun closeFeed() {

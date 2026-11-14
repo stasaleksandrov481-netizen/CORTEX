@@ -10,18 +10,27 @@ import android.graphics.PointF
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.EditorInfo
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 /** The visual task owns screen reads. Accessibility events only mark screen changes. */
 class CortexScreenService : AccessibilityService() {
-    private var revision = 0L
+    private val revisions = MutableStateFlow(0L)
+    private val revision get() = revisions.value
+    private var cachedFrame: VisualFrame? = null
+    private var frameAt = 0L
+    private var cachedOcr: Pair<VisualFrame, OcrResult>? = null
+    private var ocrAt = 0L
     private var scrolledWindow = -1
     private var scrollRevision = 0L
     private var scrollAxis: VisualScrollAxis? = null
@@ -34,11 +43,16 @@ class CortexScreenService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || event.packageName?.toString() == packageName) return
+        if (event == null) return
+        val external = event.packageName?.toString() != packageName
+        val windowChanged = event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        if (!external && !windowChanged) return
+        val next = revision + 1
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
                 scrolledWindow = event.windowId
-                scrollRevision = ++revision
+                scrollRevision = next
                 val dx = if (Build.VERSION.SDK_INT >= 28) event.scrollDeltaX else 0
                 val dy = if (Build.VERSION.SDK_INT >= 28) event.scrollDeltaY else 0
                 scrollAxis = when {
@@ -49,8 +63,12 @@ class CortexScreenService : AccessibilityService() {
                     else -> null
                 }
             }
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED, AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> revision++
         }
+        revisions.value = next
+    }
+
+    internal suspend fun waitForScreenChange(previous: Long, timeout: Long) {
+        withTimeoutOrNull(timeout) { revisions.first { it != previous } }
     }
 
     override fun onInterrupt() { CortexActionState.stop() }
@@ -61,6 +79,8 @@ class CortexScreenService : AccessibilityService() {
             CortexActionState.stop()
         }
         touch?.close()
+        cachedFrame = null
+        cachedOcr = null
         super.onDestroy()
     }
 
@@ -72,10 +92,14 @@ class CortexScreenService : AccessibilityService() {
     ).filterNot { it.activityInfo.name.substringAfterLast('.') == "FallbackHome" }
         .mapTo(mutableSetOf()) { it.activityInfo.packageName }
 
-    internal fun frame(): VisualFrame? {
+    internal fun frame(fresh: Boolean = false): VisualFrame? {
         if (locked()) return null
         return withRoot { root ->
             val pkg = root.packageName?.toString() ?: return@withRoot null
+            val now = SystemClock.uptimeMillis()
+            val previous = cachedFrame
+            if (!fresh && previous != null && previous.pkg == pkg && previous.window == root.windowId &&
+                previous.revision == revision && now - frameAt <= 160L) return@withRoot previous
             val frameBounds = windowBounds(root.windowId)
             val nodes = mutableListOf<VisualNode>()
             var visited = 0
@@ -115,20 +139,38 @@ class CortexScreenService : AccessibilityService() {
             if (!secure) visit(root, emptyList(), 0)
             VisualFrame(pkg, root.windowId, frameBounds, nodes, secure, privateFields, revision,
                 if (root.windowId == scrolledWindow) scrollRevision else 0,
-                if (root.windowId == scrolledWindow) scrollAxis else null)
+                if (root.windowId == scrolledWindow) scrollAxis else null).also {
+                cachedFrame = it
+                frameAt = now
+            }
         }
     }
 
     internal suspend fun recognize(frame: VisualFrame): OcrResult {
         if (frame.secure || frame.hasPrivateFields || Build.VERSION.SDK_INT < 30) return OcrResult()
+        val now = SystemClock.uptimeMillis()
+        cachedOcr?.takeIf { (screen, _) -> now - ocrAt < 1_000L && screen.pkg == frame.pkg &&
+            screen.window == frame.window && screen.revision == frame.revision && screen.structure() == frame.structure()
+        }?.let { return it.second }
         val recognizer = ocr ?: VisualOcr(this).also { ocr = it }
-        return recognizer.read(frame, displayBounds())
+        return recognizer.read(frame, displayBounds()).also {
+            if (!it.protected) {
+                cachedOcr = frame to it
+                ocrAt = SystemClock.uptimeMillis()
+            }
+        }
     }
 
     internal fun stopTouch() { touch?.clear() }
 
     internal fun fieldMatches(frame: VisualFrame, node: VisualNode, value: String): Boolean =
         onNode(frame, node) { current -> current.isEditable && current.text?.toString() == value }
+
+    internal fun fieldEmpty(frame: VisualFrame, node: VisualNode): Boolean =
+        onNode(frame, node) { current -> current.isEditable && (current.isShowingHintText || current.text.isNullOrEmpty()) }
+
+    internal fun click(frame: VisualFrame, node: VisualNode): Boolean =
+        onNode(frame, node) { current -> current.isClickable && current.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
 
     internal fun setText(frame: VisualFrame, node: VisualNode, value: String): Boolean = onNode(frame, node) { current ->
         current.isEditable && current.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {

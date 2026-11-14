@@ -34,7 +34,7 @@ window.CortexSetup = (() => {
 
   function prologue(id) {
     if (id === "welcome") return '<div class="intro-stage hero-intro"><div class="intro-orbit"><i></i><i></i><i></i>' +
-      mark + '</div><h1>Скажите, что<br>нужно сделать.</h1><p>CORTEX отвечает голосом, помогает с настройками и выполняет задачи на Android.</p></div>';
+      mark + '</div><h1>Скажите, что<br>нужно сделать.</h1><p>CORTEX принимает голосовые команды, управляет Android и показывает ответы текстом.</p></div>';
     return '<div class="intro-stage capability-intro"><div class="intro-illustration intro-demo" data-demo="' + demo + '">' +
       '<span class="intro-prompt">Включи фонарик</span><div class="intro-beam"></div><span class="intro-action">' +
       (demo === 2 ? icon("check", 16) + " Android подтвердил" :

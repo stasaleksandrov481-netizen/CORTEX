@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
-import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Point
 import android.graphics.PointF
@@ -40,10 +39,13 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     private val assistant by assistantDelegate
     private var island: LiquidIslandView? = null
     private var window: WindowManager.LayoutParams? = null
-    private var legacyProbe: View? = null
     private var legacyBars = Rect()
     private var legacyCutout: DisplayCutout? = null
-    private var screen: IslandScreen? = null
+    private var placement: IslandPlacement? = null
+    private var keyboardFocus = false
+    private var exiting = false
+    private var poweringOff = false
+    private var layoutGeneration = 0
     private var mode = "off"
     private var phase = "idle"
     private var message = ""
@@ -55,7 +57,6 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     private var wakeExpanded = false
     private var hiddenByVoice = false
     private var touchThrough = false
-    private val transitionFrame = Rect()
     private var task: CortexActionState.Status? = null
     private val actionBusy get() = task?.phase == "executing"
     private val actionStatus: (CortexActionState.Status) -> Unit = ::updateTask
@@ -63,13 +64,14 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     private val wakeLevel: (Float) -> Unit = { island?.audioLevel(it) }
     private val passThrough: (PointF?) -> Boolean = ::passTouchesThrough
 
-    private val settleLayout = Runnable {
-        transitionFrame.setEmpty()
-        island?.let { placeIsland(it) }
+    private val clearTask = Runnable {
+        if (opening && task?.answer?.isNotBlank() == true) return@Runnable
+        task = null
+        render()
     }
-    private val clearTask = Runnable { task = null; render() }
     private val returnToIdle = Runnable { updateStatus("idle", "") }
     private var repaintPending = false
+    private var nextAnimation: Runnable? = null
     private val repaintAnswer = Runnable {
         repaintPending = false
         if (busy) render()
@@ -111,21 +113,37 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (poweringOff) {
+            if (preferences.getBoolean(WAKE_PAUSED, false)) return START_NOT_STICKY
+            poweringOff = false
+            exiting = false
+            removeIsland()
+        }
         if (intent?.action == ACTION_CONFIG) {
             val requested = intent.getStringExtra(EXTRA_MODE)
             if (requested in setOf("always", "wake", "off")) {
                 preferences.edit().putString("mode", requested)
                     .putBoolean(EXTRA_HIDE_LANDSCAPE, intent.getBooleanExtra(EXTRA_HIDE_LANDSCAPE, true)).apply()
-                if (intent.getBooleanExtra(EXTRA_RESUME, false)) hiddenByVoice = false
             }
         }
         mode = preferences.getString("mode", "off") ?: "off"
+        if (mode != "off" && intent?.getBooleanExtra(EXTRA_RESUME, false) == true) {
+            if (hiddenByVoice && exiting) {
+                exiting = false
+                removeIsland()
+            }
+            hiddenByVoice = false
+        }
         if (mode == "off" || preferences.getBoolean(WAKE_PAUSED, false)) {
-            stopSelf()
+            dismissIsland(power = true)
             return START_NOT_STICKY
         }
         when (intent?.action) {
             ACTION_WAKE -> {
+                if (hiddenByVoice && exiting) {
+                    exiting = false
+                    removeIsland()
+                }
                 hiddenByVoice = false
                 if (!busy && !actionBusy) {
                     task = null
@@ -142,6 +160,7 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
             }
             ACTION_SUBMIT -> {
                 val text = intent.getStringExtra(EXTRA_MESSAGE).orEmpty()
+                if (handleControl(this, text) != null) return START_NOT_STICKY
                 if (text.trim().matches(STOP_COMMAND)) stopAnswer()
                 else if (text.isNotBlank() && !hiddenByVoice && canShow() && !busy && !actionBusy) {
                     submit(text, fromVoice = true)
@@ -157,21 +176,61 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
             resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE)
 
     private fun updateTask(status: CortexActionState.Status) {
+        if (poweringOff) return
         task = status
         ui.removeCallbacks(clearTask)
         if (actionBusy) {
+            reply = ""
             setExpanded(false)
         } else {
             val remaining = RESULT_MS - (SystemClock.uptimeMillis() - status.at)
             ui.postDelayed(clearTask, remaining.coerceAtLeast(0))
         }
         render()
+        if (!actionBusy && !busy && status.answer.isNotBlank() && !hiddenByVoice && !CortexRuntime.appVisible) {
+            setExpanded(true)
+        }
     }
 
     private fun hideTemporarily() {
+        if (hiddenByVoice || poweringOff) return
         hiddenByVoice = true
-        CortexVoiceOutput.silence(this)
-        if (!busy) updateStatus("idle", "") else render()
+        dismissIsland(power = false)
+    }
+
+    private fun dismissIsland(power: Boolean) {
+        if (power) {
+            if (poweringOff) return
+            poweringOff = true
+            ui.removeCallbacks(returnToIdle)
+            ui.removeCallbacks(clearTask)
+            ui.removeCallbacks(repaintAnswer)
+        } else if (exiting) return
+        val view = island
+        if (view == null) {
+            if (power) stopSelf()
+            return
+        }
+        exiting = true
+        ++layoutGeneration
+        keyboardFocus = false
+        touchThrough = true
+        view.conversation.hideKeyboard()
+        window?.let { params ->
+            params.flags = windowFlags(false)
+            if (Build.VERSION.SDK_INT >= 31) {
+                params.alpha = (getSystemService(InputManager::class.java).maximumObscuringOpacityForTouch - .02f)
+                    .coerceIn(0f, 1f)
+            }
+            runCatching { manager.updateViewLayout(view, params) }
+        }
+        view.disappear(power) {
+            if (island === view && exiting) {
+                exiting = false
+                removeIsland()
+                if (poweringOff) stopSelf()
+            }
+        }
     }
 
     private fun updateStatus(state: String, text: String) {
@@ -192,111 +251,104 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     }
 
     private fun render() {
+        if (exiting || poweringOff) return
         if (mode == "off" || hiddenByVoice || CortexRuntime.appVisible || !canShow() ||
             (mode == "wake" && phase == "idle" && task == null && !opening && !moving)) {
             removeIsland()
             return
         }
-        if (Build.VERSION.SDK_INT in 26..28 && legacyProbe == null) watchLegacyInsets()
-        val geometryChanged = screen == null
-        val nextScreen = screen ?: measureScreen().also { screen = it }
-        val visible = island ?: createIsland(nextScreen) ?: return
-        val state = task?.phase ?: phase
-        val label = task?.message ?: when (phase) {
+        if (placement == null) placement = IslandPlacement(measureScreen(), overlayContext.resources.displayMetrics.density)
+        val visible = island ?: createIsland() ?: return
+        val state = if (busy && !actionBusy) phase else task?.phase ?: phase
+        val progressText = task?.message.orEmpty()
+        val label = when (state) {
             "listening" -> message.ifBlank { "Слушаю…" }
-            "executing" -> message.ifBlank { "Думаю…" }
-            "done" -> if (reply.isNotBlank()) "Ответ готов" else "Готово"
-            "error" -> if (reply.isNotBlank()) "Открыть ответ" else message.ifBlank { "Не удалось выполнить" }
-            "stopped" -> message.ifBlank { "Остановлено" }
+            "executing" -> progressText.ifBlank { message.ifBlank { "Выполняю…" } }
+            "done" -> "Готово"
+            "error" -> "Проверьте результат"
+            "stopped" -> "Остановлено"
             "understood" -> message
             else -> ""
         }
-        val wasStatus = visible.hasStatus
         visible.phase(state, label, actionBusy)
         visible.haptics = preferences.getBoolean("haptics", true)
         visible.reduceMotion(preferences.getBoolean("reduceMotion", false))
         visible.conversation.status(state, label)
         visible.conversation.busy(busy || actionBusy)
-        val answerResized = visible.conversation.answer(reply)
-        if (geometryChanged || wasStatus != (label.isNotEmpty()) || answerResized) {
-            placeIsland(visible, deform = !geometryChanged && !moving)
-        }
+        val resultText = task?.takeUnless { actionBusy }?.answer.orEmpty()
+        visible.conversation.answer(if (busy || reply.isNotBlank()) reply else resultText)
+        placeIsland(visible)
     }
 
-    private fun createIsland(currentScreen: IslandScreen): LiquidIslandView? {
+    private fun createIsland(): LiquidIslandView? {
         val panel = IslandConversationPanel(overlayContext, { submit(it) }, ::stopAnswer,
             { setExpanded(false) }, ::openApplication)
         panel.draft(draft)
+        panel.onKeyboardFocus = { focused ->
+            keyboardFocus = focused && opening && !exiting
+            island?.let(::placeIsland)
+        }
         val view = LiquidIslandView(overlayContext, panel, { setExpanded(true) },
             { setExpanded(false) }, ::openApplication, ::stopAnswer)
-        screen = currentScreen
         val params = layoutParams()
         window = params
-        placeIsland(view, update = false)
+        placeIsland(view)
+        if (Build.VERSION.SDK_INT in 26..28) watchLegacyInsets(view)
         return runCatching { manager.addView(view, params); view }.onSuccess { island = it }
             .onFailure { window = null }.getOrNull()
     }
 
     private fun setExpanded(open: Boolean) {
-        if (open && actionBusy) return
+        if (exiting || poweringOff || open && actionBusy) return
         val view = island ?: return
         if (open == opening) return
+        nextAnimation?.let(view::removeCallbacks)
+        val generation = ++layoutGeneration
         opening = open
         moving = true
-        if (!open) view.conversation.hideKeyboard()
+        if (!open) {
+            keyboardFocus = false
+            view.conversation.hideKeyboard()
+        }
         placeIsland(view)
-        view.postOnAnimation {
-            if (island !== view || opening != open) return@postOnAnimation
-            view.expand(open, !preferences.getBoolean("reduceMotion", false)) {
-                if (island === view && opening == open) {
+        nextAnimation = Runnable {
+            nextAnimation = null
+            if (island !== view || generation != layoutGeneration || exiting) return@Runnable
+            view.expand(open) {
+                if (island === view && generation == layoutGeneration && !exiting) {
                     moving = false
                     placeIsland(view)
-                    if (!open) render()
+                    if (!open) {
+                        if (task?.let { it.phase != "executing" && SystemClock.uptimeMillis() - it.at >= RESULT_MS } == true) task = null
+                        render()
+                    }
                 }
             }
-        }
+        }.also(view::postOnAnimation)
     }
 
-    private fun placeIsland(view: LiquidIslandView, update: Boolean = true, deform: Boolean = false) {
-        val viewport = screen ?: return
-        val lp = window ?: return
-        val d = view.resources.displayMetrics.density
-        val safe = viewport.safeArea(d)
-        val panelWidth = minOf(safe.width(), 352 * d).roundToInt().coerceAtLeast(1)
-        view.conversation.measure(View.MeasureSpec.makeMeasureSpec(panelWidth, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(safe.height().roundToInt().coerceAtLeast(1), View.MeasureSpec.AT_MOST))
-        val placement = IslandPlacement(viewport, d, view.hasStatus, panelWidth, view.conversation.measuredHeight)
-        val box = Rect(placement.frame(opening, moving))
-        val previous = Rect(lp.x + viewport.bounds.left, lp.y + viewport.bounds.top,
-            lp.x + lp.width + viewport.bounds.left, lp.y + lp.height + viewport.bounds.top)
-        val transition = deform && !previous.isEmpty &&
-            !preferences.getBoolean("reduceMotion", false) && android.animation.ValueAnimator.areAnimatorsEnabled()
-        if (transition) {
-            transitionFrame.union(previous)
-            ui.removeCallbacks(settleLayout)
-            ui.postDelayed(settleLayout, LiquidIslandView.GEOMETRY_MS)
-        }
-        if (moving) box.union(previous)
-        if (!transitionFrame.isEmpty) box.union(transitionFrame)
-        val flags = windowFlags(opening && !actionBusy)
-        if (box == previous && flags == lp.flags) {
-            view.place(placement, transition)
-            return
-        }
-        lp.width = box.width().coerceAtLeast(1)
-        lp.height = box.height().coerceAtLeast(1)
-        lp.x = box.left - viewport.bounds.left
-        lp.y = box.top - viewport.bounds.top
-        lp.flags = flags
-        if (update && view.isAttachedToWindow) runCatching { manager.updateViewLayout(view, lp) }
-        view.place(placement, transition)
+    private fun placeIsland(view: LiquidIslandView) {
+        val geometry = placement ?: return
+        val params = window ?: return
+        val box = geometry.window(opening || moving)
+        val x = box.left - geometry.screen.bounds.left
+        val y = box.top - geometry.screen.bounds.top
+        val flags = windowFlags(keyboardFocus)
+        val changed = x != params.x || y != params.y || box.width() != params.width ||
+            box.height() != params.height || flags != params.flags
+        params.x = x
+        params.y = y
+        params.width = box.width().coerceAtLeast(1)
+        params.height = box.height().coerceAtLeast(1)
+        params.flags = flags
+        if (changed && view.isAttachedToWindow) runCatching { manager.updateViewLayout(view, params) }
+        view.place(geometry, box)
     }
 
     private fun submit(raw: String, fromVoice: Boolean = false) {
         val text = raw.trim().take(2400)
         if (handleControl(this, text) != null) return
-        if (busy || actionBusy || text.isEmpty()) return
-        CortexVoiceOutput.silence(this)
+        if (busy || actionBusy || text.isEmpty() || poweringOff) return
         if (fromVoice) island?.conversation?.hideKeyboard()
         busy = true
         task = null
@@ -324,17 +376,11 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
                 busy = false
                 reply = answer.trim()
                 updateStatus(if (ok) "done" else "error", "")
-                val settings = VoiceStore.get(this)
-                if (ok && !hiddenByVoice && !CortexRuntime.appVisible && (fromVoice || settings.readText)) {
-                    val spoken = reply.replace(Regex("```[\\s\\S]*?```"), " ").replace(Regex("[*`#]"), "").trim()
-                    val locale = if (spoken.any { it in 'а'..'я' || it in 'А'..'Я' || it == 'ё' || it == 'Ё' }) "ru-RU" else "en-US"
-                    CortexVoiceOutput.speak(this, this, "island", spoken, locale, settings.speed)
-                }
+                if (!hiddenByVoice && !poweringOff) setExpanded(true)
             })
     }
 
     private fun stopAnswer() {
-        CortexVoiceOutput.silence(this)
         if (!busy) { if (actionBusy) CortexActionState.stop(); return }
         assistant.cancel()
         busy = false
@@ -350,11 +396,11 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         }
     }
 
-    private fun layoutParams(touchable: Boolean = true): WindowManager.LayoutParams =
+    private fun layoutParams(): WindowManager.LayoutParams =
         WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            if (touchable) windowFlags(false) else windowFlags(false) or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            windowFlags(false),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.LEFT
@@ -373,11 +419,13 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
             (if (Build.VERSION.SDK_INT < 30) WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS else 0) or
-            (if (focus && !touchThrough) WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) or
+            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+            (if (focus && !touchThrough) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) or
             (if (touchThrough) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
 
     private fun passTouchesThrough(point: PointF?): Boolean {
         val view = island ?: return false
+        if (exiting) return false
         val lp = window ?: return false
         if (point != null && !view.windowContains(point)) return false
         val enabled = point != null
@@ -387,12 +435,12 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
             val maximum = getSystemService(InputManager::class.java).maximumObscuringOpacityForTouch
             (maximum - .03f).coerceIn(0f, 1f)
         } else 1f
-        lp.flags = windowFlags(opening && !actionBusy)
+        lp.flags = windowFlags(keyboardFocus && !actionBusy)
         val updated = runCatching { manager.updateViewLayout(view, lp) }.isSuccess
         if (!updated) {
             touchThrough = false
             lp.alpha = 1f
-            lp.flags = windowFlags(opening && !actionBusy)
+            lp.flags = windowFlags(keyboardFocus && !actionBusy)
         }
         return enabled && updated
     }
@@ -424,11 +472,10 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
 
     private fun cutouts(value: DisplayCutout?, bounds: Rect): List<IslandCutout> {
         if (value == null || Build.VERSION.SDK_INT < 28) return emptyList()
-        val contour = if (Build.VERSION.SDK_INT >= 31) value.cutoutPath else null
         if (Build.VERSION.SDK_INT >= 29) return listOf(
             Gravity.TOP to value.boundingRectTop, Gravity.LEFT to value.boundingRectLeft,
             Gravity.RIGHT to value.boundingRectRight, Gravity.BOTTOM to value.boundingRectBottom
-        ).filterNot { (_, rect) -> rect.isEmpty }.map { (edge, rect) -> IslandCutout(edge, rect, contour) }
+        ).filterNot { (_, rect) -> rect.isEmpty }.map { (edge, rect) -> IslandCutout(edge, rect) }
         return value.boundingRects.map { rect ->
             val edge = listOf(
                 Gravity.TOP to rect.top - bounds.top, Gravity.LEFT to rect.left - bounds.left,
@@ -439,61 +486,55 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
     }
 
     @Suppress("DEPRECATION")
-    private fun watchLegacyInsets() {
-        val probe = View(overlayContext)
-        probe.setOnApplyWindowInsetsListener { _, insets ->
+    private fun watchLegacyInsets(view: View) {
+        view.setOnApplyWindowInsetsListener { _, insets ->
             val bars = Rect(insets.stableInsetLeft, insets.stableInsetTop, insets.stableInsetRight, insets.stableInsetBottom)
             val cutout = if (Build.VERSION.SDK_INT >= 28) insets.displayCutout else null
-            if (bars != legacyBars || cutout != legacyCutout) {
+            if (bars != legacyBars || cutout != null && cutout != legacyCutout) {
                 legacyBars = bars
-                legacyCutout = cutout
-                screen = null
+                if (cutout != null) legacyCutout = cutout
+                placement = null
                 ui.post(::render)
             }
             insets
         }
-        val params = layoutParams(false).apply {
-            width = WindowManager.LayoutParams.MATCH_PARENT
-            height = WindowManager.LayoutParams.MATCH_PARENT
-            alpha = 0f
-        }
-        runCatching { manager.addView(probe, params); legacyProbe = probe }
     }
 
     private fun removeIsland() {
-        ui.removeCallbacks(settleLayout)
+        ++layoutGeneration
         island?.let { view ->
+            nextAnimation?.let(view::removeCallbacks)
+            nextAnimation = null
             draft = view.conversation.draft()
+            view.cancelAnimation()
             view.conversation.hideKeyboard()
             runCatching { manager.removeViewImmediate(view) }
         }
         island = null
         window = null
         touchThrough = false
-        transitionFrame.setEmpty()
+        keyboardFocus = false
         opening = false
         moving = false
         wakeExpanded = false
-        legacyProbe?.let { runCatching { manager.removeViewImmediate(it) } }
-        legacyProbe = null
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        screen = null
+        placement = null
+        legacyCutout = null
         ui.post(::render)
     }
 
     override fun onDisplayChanged(displayId: Int) {
         if (displayId != Display.DEFAULT_DISPLAY) return
-        screen = null
+        placement = null
         ui.post(::render)
     }
     override fun onDisplayAdded(displayId: Int) = Unit
     override fun onDisplayRemoved(displayId: Int) = Unit
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() {
-        CortexVoiceOutput.silence(this)
         if (CortexActionState.listener === actionStatus) CortexActionState.listener = null
         if (CortexRuntime.islandVisibility === visibilityChanged) CortexRuntime.islandVisibility = null
         if (CortexRuntime.wakeLevel === wakeLevel) CortexRuntime.wakeLevel = null
@@ -535,13 +576,15 @@ class CortexIslandService : Service(), DisplayManager.DisplayListener {
                 }
                 POWER_COMMAND.matches(command) -> {
                     context.getSharedPreferences("cortex-display", MODE_PRIVATE).edit().putBoolean(WAKE_PAUSED, true).apply()
+                    val service = running
+                    service?.dismissIsland(power = true)
                     CortexActionState.stop()
-                    running?.let {
-                        it.hideTemporarily()
+                    CortexActionEngine.clearPaused()
+                    service?.let {
                         if (it.assistantDelegate.isInitialized()) it.assistant.cancel()
                     }
                     context.stopService(Intent(context, CortexWakeService::class.java))
-                    context.stopService(Intent(context, CortexIslandService::class.java))
+                    if (service == null) context.stopService(Intent(context, CortexIslandService::class.java))
                     CortexSupportNotification.pause(context)
                     CortexRuntime.reportWake(null)
                     CortexRuntime.shutdownListener?.invoke()

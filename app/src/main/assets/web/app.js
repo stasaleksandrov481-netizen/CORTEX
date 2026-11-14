@@ -20,11 +20,10 @@
   const drafts = new Map(), errors = new Map(), ruleDrafts = new Map(), actionReplies = new Map();
   const filters = { search: "", onlySaved: false };
   const connection = { google: false, profiles: false, checked: false, visualPrivacy: false };
-  let voiceCatalog = {};
   let wakeState = "", islandCamera = "drop";
   const permissions = { microphone: false, notifications: false, overlay: false, screenLock: false, screenLockSupported: false, brightness: false, verifyApps: false, screenAutomation: false, assistant: false, assistantSupported: false };
   let route = "home", chatId = "", rule = "goal";
-  let pending, login, voice, readoutId, activeSheet, ghost, pageMotion, composerMotion, headingMotion, clearMorph, screenContext, drawerExit, sheetExit, inlineToast, toastTimer;
+  let pending, login, voice, activeSheet, ghost, pageMotion, composerMotion, headingMotion, clearMorph, screenContext, drawerExit, sheetExit, inlineToast, toastTimer;
   let connectionLoad, loginCleanup;
   let keyboardBaseline = 0, keyboardObserved = false, historySearchTimer = 0;
   let statusEpoch = 0, splashFrame = 0, splashTimer = 0, splashPrevious = null;
@@ -46,8 +45,7 @@
   const reduced = () => S.preferences.reduceMotion || systemMotion.matches;
   const current = () => M.chat(chatId);
   const draftKey = () => route === "chat" ? chatId : "home";
-  const waveMode = () => voice?.phase === "speaking" ? "speaking" :
-    ["listening", "hearing"].includes(voice?.phase) ? "voice" :
+  const waveMode = () => ["listening", "hearing"].includes(voice?.phase) ? "voice" :
     pending && pending.chatId === chatId ? "thinking" : document.activeElement === input ? "focus" : "idle";
   const language = () => S.preferences.language === "en-US" ? "en-US" : "ru-RU";
 
@@ -72,13 +70,8 @@
     catch { return false; }
   }
 
-  function syncVoiceOptions() {
-    sendDevice("voice-config", { enabled: S.preferences.voiceEnabled, readText: S.preferences.readAloud,
-      speed: Number(S.preferences.speechSpeed) });
-  }
-
   function syncIslandOptions() {
-    sendDevice("island-options", { profile: S.preferences.model, phoneActions: S.preferences.phoneActions,
+    sendDevice("island-options", { profile: S.preferences.model, phoneActions: S.preferences.phoneActions, visualLaunch: S.preferences.visualLaunch,
       reduceMotion: reduced(), haptics: S.preferences.haptics });
   }
 
@@ -177,7 +170,7 @@
     screen.dataset.chat = route === "chat" ? chatId : "";
     screen.className = "screen " + route + "-screen";
     screen.innerHTML = U.page(route, {
-      connection, permissions, voices: voiceCatalog, wakeState, islandCamera, native: Boolean(device), login, chat: current(), messageEnter,
+      connection, permissions, wakeState, islandCamera, native: Boolean(device), login, chat: current(), messageEnter,
       pending: route === "chat" && pending?.chatId === chatId ? pending : null,
       error: route === "chat" ? errors.get(chatId) : null,
       rule, ruleDraft: ruleDrafts.get(rule)
@@ -228,7 +221,7 @@
     ghost = old;
     const remove = () => { old.remove(); if (ghost === old) ghost = null; };
     old.animate([{ opacity: 1, transform: "none" },
-      { opacity: 0, transform: `translate3d(${-direction * 16}px,-4px,0) scale(.991)` }],
+      { opacity: 0, transform: `translate3d(${-direction * 10}px,-3px,0) scale(.996)` }],
       { duration, easing: "cubic-bezier(.24,.62,.24,1)", fill: "forwards" }).finished.then(remove, remove);
   }
 
@@ -281,7 +274,7 @@
     const intoHome = next === "home";
     const switchesTab = rootTab(previous) !== rootTab(next);
     if (animated && (route !== "chat" || (current()?.messages.length || 0) < 40)) {
-      fadeOldPage(switchesTab ? 230 : 168, intoChat, switchesTab ? tabDirection : 0);
+      fadeOldPage(switchesTab ? 240 : 176, intoChat, switchesTab ? tabDirection : 0);
     }
     route = next;
     if (next === "chat") chatId = id;
@@ -308,7 +301,6 @@
       }
     }
     if (permissionsPage()) sendDevice("permissions");
-    if (route === "voice") sendDevice("voice-catalog");
   }
 
   function readRoute() {
@@ -316,7 +308,7 @@
     closeVoice();
     clearVisuals();
     const [name, id] = location.hash.slice(1).split("/");
-    const resolved = { appearance: "motion", connection: "settings" }[name] || name;
+    const resolved = { appearance: "motion", connection: "settings", voice: "phone-tools" }[name] || name;
     route = routes.has(resolved) ? resolved : "home";
     if (route !== "chat" && document.activeElement === input) input.blur();
     if (route !== "chat") app.classList.remove("composer-active");
@@ -332,7 +324,6 @@
       if (switchesTab) clearMorph = Motion.wave(app, null, -1);
     }
     if (permissionsPage()) sendDevice("permissions");
-    if (route === "voice") sendDevice("voice-catalog");
   }
 
   function back() {
@@ -676,16 +667,6 @@
     updateJumpLatest();
   }
 
-  function speak(text, id, preferredLocale) {
-    if (!S.preferences.voiceEnabled) return false;
-    if (!id) id = readoutId = M.id("speech");
-    const locale = preferredLocale || (S.preferences.language === "auto" && /[a-z]/iu.test(text) && !/[а-яё]/iu.test(text) ? "en-US" : language());
-    return sendDevice("speak", {
-      id, language: locale, speed: Number(S.preferences.speechSpeed),
-      text: Markdown.spoken(text, locale === "en-US" ? "The answer is available in the chat." : "Ответ доступен в чате.")
-    });
-  }
-
   function nativeAction(job, text) {
     if (!device || job.explain || job.screen) return Promise.resolve(null);
     const id = M.id("action");
@@ -704,7 +685,7 @@
       };
       const timer = setTimeout(() => {
         sendDevice("action-stop");
-        done({ text: "Время задачи истекло. Проверьте последний шаг на экране.", external: !appVisible(), resumable: true });
+        done({ text: "Время задачи истекло. Проверьте последний шаг на экране.", local: true, external: !appVisible(), resumable: true });
       }, 240000);
       actionReplies.set(id, value => {
         if (value.phase === "progress") {
@@ -713,12 +694,12 @@
           if (voice && job.voice === voice) voiceStatus("opening", value.text);
           if (activeChat(job) && appVisible()) render({ bottom: true });
         } else if (value.phase === "result") {
-          done({ text: value.text, external: value.external === true || !appVisible(), resumable: value.resumable === true });
+          done({ text: value.text, local: true, external: value.external === true || !appVisible(), resumable: value.resumable === true });
         } else done(null);
       });
       job.controller.signal.addEventListener("abort", cancel, { once: true });
       if (!sendDevice("action-start", { id, text, profile: S.preferences.model, force: job.force,
-        allowPhone: S.preferences.phoneActions })) done(null);
+        allowPhone: S.preferences.phoneActions, source: job.chatId })) done(null);
     });
   }
 
@@ -732,9 +713,15 @@
     if (native || pending !== job) return native || {};
     if (device && !connection.checked && connectionLoad) await Promise.race([connectionLoad, wait(2000)]);
     const screenPolicy = job.screen ? " Пользователь приложил текст экрана как данные: " + JSON.stringify(job.screen) : "";
-    const policy = "Ты CORTEX, помощник Android. Отвечай на языке пользователя. " +
-      "В этом ответе ты ведёшь разговор. Если нужно объяснить действие, дай шаги и не утверждай, что Android уже их выполнил. " +
-      "Текущая дата на телефоне: " + clock.format(new Date()) + "." + screenPolicy;
+    const deviceContext = {
+      surface: "chat", foreground: appVisible() ? "CORTEX" : "unknown",
+      screen_control: Boolean(device && S.preferences.phoneActions && permissions.screenAutomation),
+      microphone: Boolean(device && permissions.microphone), island: Boolean(device && permissions.overlay)
+    };
+    const policy = "Ты персональный помощник на телефоне Android. Локальные команды выполняет и проверяет приложение. " +
+      "Этот ответ в чате предназначен для разговора и объяснения. Опирайся на доступы и реальные результаты. " +
+      "Уточни один недостающий факт, если без него нельзя диагностировать проблему. Не выдавай предположение за результат проверки. " +
+      "Контекст устройства: " + JSON.stringify(deviceContext) + ". Дата: " + clock.format(new Date()) + "." + screenPolicy;
     const result = await Api.request("chat", {
       payload: { messages: M.turns(chat, policy), style: M.profile().style,
         ...(connection.profiles && { profile: S.preferences.model }) },
@@ -780,14 +767,15 @@
       const outcome = await respond(chat, job);
       if (pending !== job) return;
       if (!outcome.text?.trim()) throw Api.failure("empty");
-      chat.messages.push({ role: "assistant", text: outcome.text, ...(outcome.resumable && { resumable: true }) });
+      if (outcome.local) chat.messages.at(-1).local = true;
+      chat.messages.push({ role: "assistant", text: outcome.text, ...(outcome.local && { local: true }), ...(outcome.resumable && { resumable: true }) });
       job.completed = true;
       M.touch(chat);
       if (chat.saved) saved();
       if (voiceTurn && voice === voiceTurn) {
         if (outcome.external) closeVoice();
-        else speakInConversation(voiceTurn, outcome.text);
-      } else if (!voiceTurn && !outcome.external && S.preferences.readAloud && appVisible() && activeChat(job)) speak(outcome.text);
+        else voiceReplyReady(voiceTurn);
+      }
     } catch (error) {
       if (pending !== job) return;
       errors.set(chat.id, Object.assign(error, { explain }));
@@ -1005,7 +993,7 @@
     voicePanel.querySelector("[data-voice-status]").textContent = text;
     const labels = { starting: "Включаю микрофон", listening: "Завершить запись", hearing: "Завершить запись",
       recognizing: "Распознаю речь", thinking: "Перебить", opening: "Выполняю действие", preparing: "Перебить",
-      speaking: "Перебить", waiting: "Говорить", error: "Повторить" };
+      waiting: "Говорить", error: "Повторить" };
     voiceControl.innerHTML = icon(["waiting", "error", "starting"].includes(phase) ? "mic" : "stop", 17);
     voiceControl.setAttribute("aria-label", labels[phase]);
     voiceControl.title = labels[phase];
@@ -1020,7 +1008,6 @@
     voice = null;
     clearTimeout(job.timer);
     if (job.recognition) sendDevice("voice-cancel", { id: job.recognition });
-    if (job.speech) sendDevice("silence", { id: job.speech });
     voicePanel.hidden = true;
     delete voicePanel.dataset.voicePhase;
     Wave.state(waveMode());
@@ -1071,29 +1058,18 @@
     if (["listening", "hearing"].includes(job.phase)) {
       recognizing(job);
       sendDevice("voice-finish", { id: job.recognition });
-    } else if (["thinking", "opening", "preparing", "speaking"].includes(job.phase)) {
+    } else if (["thinking", "opening"].includes(job.phase)) {
       if (pending?.voice === job) stopAnswer();
-      if (job.speech) sendDevice("silence", { id: job.speech });
-      job.speech = null;
       clearTimeout(job.timer);
       voiceStatus("waiting", "Готовлю микрофон…");
       job.timer = setTimeout(() => listen(job), 300);
     } else if (job.phase === "waiting" || job.phase === "error") listen(job);
   }
 
-  function speakInConversation(job, text) {
-    if (!appVisible()) { voiceStatus("waiting", "Ответ готов в чате"); return; }
-    if (!S.preferences.voiceEnabled) { conversationSpeech(job, "muted"); return; }
-    job.speech = M.id("speech");
-    voiceStatus("preparing", "Готовлю озвучивание…");
-    if (!speak(text, job.speech)) { voiceStatus("error", "Озвучивание недоступно."); return; }
+  function voiceReplyReady(job) {
     clearTimeout(job.timer);
-    job.timer = setTimeout(() => {
-      if (voice !== job || job.phase !== "preparing") return;
-      sendDevice("silence", { id: job.speech });
-      job.speech = null;
-      voiceStatus("error", "Не удалось начать озвучивание.");
-    }, 44000);
+    voiceStatus("waiting", "Ответ в чате");
+    if (S.preferences.voiceContinue && appVisible()) job.timer = setTimeout(() => listen(job), 340);
   }
 
   function finishDictation(job, text) {
@@ -1148,40 +1124,17 @@
     }
   }
 
-  function conversationSpeech(job, phase) {
-    clearTimeout(job.timer);
-    if (phase === "started") { voiceStatus("speaking", "Говорю"); return; }
-    job.speech = null;
-    if (phase === "done" || phase === "muted") {
-      if (S.preferences.voiceContinue && appVisible()) {
-        voiceStatus("waiting", "Включаю микрофон…");
-        job.timer = setTimeout(() => listen(job), 420);
-      } else voiceStatus("waiting", "Нажмите микрофон, чтобы продолжить");
-    } else if (phase === "stopped") voiceStatus("waiting", "Озвучивание остановлено");
-    else voiceStatus("error", "Не удалось озвучить ответ. Он доступен в чате.");
-  }
-
   function deviceEvent(event) {
     let message;
     try { message = JSON.parse(event.data); } catch { return; }
     if (message.type === "voice" && voice?.recognition && message.id === voice.recognition) {
       recognitionEvent(voice, message);
     }
-    if (message.type === "voice-catalog") {
-      const bar = screen.querySelector("[data-voice-progress]");
-      const progressOnly = message.downloading && message.downloading === voiceCatalog.downloading &&
-        message.loading === voiceCatalog.loading && message.offline === voiceCatalog.offline && message.stage === voiceCatalog.stage;
-      voiceCatalog = message;
-      if (route === "voice") {
-        if (progressOnly && bar) bar.value = message.progress;
-        else render();
-      }
-    }
-    if (message.type === "speech") {
-      if (voice?.speech && message.id === voice.speech) conversationSpeech(voice, message.phase);
-      else if (readoutId && message.id === readoutId && message.phase !== "started") {
-        readoutId = null;
-        if (message.phase === "error") flash("Не удалось озвучить текст. Проверьте выбранный голос.");
+    if (message.type === "wake-command") {
+      const text = typeof message.text === "string" ? message.text.trim().slice(0, 2400) : "";
+      if (text && !pending && !app.classList.contains("in-onboarding")) {
+        const chat = route === "chat" ? current() : M.createChat();
+        if (chat) void answer(chat, text, { from: route === "chat" ? null : nav });
       }
     }
     if (message.type === "action") actionReplies.get(message.id)?.(message);
@@ -1215,7 +1168,6 @@
       }
       if (message.type === "wake-shutdown") {
         closeVoice();
-        sendDevice("silence");
         if (pending && !pending.nativeRunning) {
           stopAnswer(false);
           render();
@@ -1258,8 +1210,7 @@
     S.preferences[key] = value;
     saved();
     appearance();
-    if (["model", "phoneActions", "reduceMotion", "haptics"].includes(key)) syncIslandOptions();
-    if (["voiceEnabled", "readAloud", "speechSpeed"].includes(key)) syncVoiceOptions();
+    if (["model", "phoneActions", "visualLaunch", "reduceMotion", "haptics"].includes(key)) syncIslandOptions();
     render();
   }
 
@@ -1314,10 +1265,9 @@
     "clear-local": () => confirm("Сбросить локальные данные?", "Чаты, заметки, память и настройки будут удалены с устройства.", () => {
       if (!M.clearLocalData()) { flash("Не удалось удалить локальные данные."); return; }
       if (pending) stopAnswer(false);
-      sendDevice("silence");
       drafts.clear(); errors.clear(); ruleDrafts.clear();
       chatId = ""; rule = "goal";
-      appearance(); syncVoiceOptions(); render(); flash("Локальные данные сброшены");
+      appearance(); render(); flash("Локальные данные сброшены");
     }),
     stop: () => stopAnswer(),
     retry() {
@@ -1326,10 +1276,6 @@
     },
     copy(index) { return copyText(current()?.messages[Number(index)]?.text); },
     "copy-code"(_, control) { return copyText(control.closest(".code-block")?.querySelector("code")?.textContent); },
-    speak(index) {
-      const text = current()?.messages[Number(index)]?.text;
-      if (text && !speak(text)) flash(S.preferences.voiceEnabled ? "Озвучка доступна в Android." : "Озвучка выключена в настройках.");
-    },
     dictate: (_, control) => startVoice(true, control),
     "voice-chat": (_, control) => startVoice(false, control),
     "voice-turn": useVoice,
@@ -1405,21 +1351,6 @@
     },
     quality(value) { if (Object.hasOwn(M.motion, value)) preference("quality", value); },
     language(value) { if (Object.hasOwn(M.languages, value)) preference("language", value); },
-    "voice-catalog": () => sendDevice("voice-catalog", { force: true }),
-    "voice-install": id => sendDevice("voice-install", { id }),
-    "voice-select": id => sendDevice("voice-select", { id }),
-    "voice-remove": id => confirm("Удалить голос?", "Файлы голоса будут удалены с устройства.", () => {
-      closeSheet();
-      sendDevice("voice-remove", { id });
-    }),
-    "voice-preview"(value) {
-      const [id, tag] = value.split("|");
-      if (id !== voiceCatalog.selected && !(id === "android" && !voiceCatalog.selected)) return;
-      const locale = tag || language();
-      const sample = locale.startsWith("ru") ? "Привет. Это Кортекс. Как я могу помочь?" : locale.startsWith("en") ? "Hello. This is Cortex. How can I help?" : "1, 2, 3.";
-      speak(sample, undefined, locale);
-    },
-    "speech-speed"(value) { if (["0.85", "1", "1.15"].includes(value)) preference("speechSpeed", value); },
     toggle(key) {
       if (key === "hotwordEnabled" && !window.CortexIslandControl) {
         flash("Активация по слову «Кортекс» недоступна: обновите приложение.");
@@ -1433,7 +1364,6 @@
         sendDevice("support-notify-config", { enabled: S.preferences[key] });
       }
       if (key === "phoneActions" && !S.preferences[key]) sendDevice("action-stop");
-      if (key === "readAloud" && !S.preferences[key]) sendDevice("silence");
       if (key === "hideLandscape") sendDevice("overlay-config", {mode:S.preferences.overlayMode,hideLandscape:S.preferences.hideLandscape});
       if (key === "hotwordEnabled") {
         if (S.preferences.hotwordEnabled && S.preferences.overlayMode === "off" && permissions.overlay) {
@@ -1577,8 +1507,6 @@
     sendDevice("wake-config", { enabled: true, restore: true });
   }
   sendDevice("screen-context");
-  syncVoiceOptions();
-  if (route === "voice") sendDevice("voice-catalog");
   connectionLoad = refreshConnection();
   restoreLogin();
 })();

@@ -101,7 +101,7 @@ internal object VisualLabels {
 internal object VisualRequest {
     private val action = Regex("""(?<![\p{L}\p{N}_])(?:открой|запусти|зайди|перейди|найди|отыщи|покажи|нажми|нажать|пролистай|прокрути|свайпни|введи|вставь|заполни|набери|напиши|отправь|создай|удали|перемести|скачай|установи|измени|поменяй|поставь|выбери|настрой|включи|выключи|отключи|закрой|выйди|заблокируй|разблокируй|исправь|почини|перезапусти|сделай|выполни|прочитай|пройди|запиши|реши|выполнить|открыть|включить|выключить|open|launch|tap|scroll|swipe|type|send|create|delete|install|close|enable|disable|turn|navigate|select|read|fill|find)(?![\p{L}\p{N}_])""", RegexOption.IGNORE_CASE)
     private val explain = Regex("""^(?:как|зачем|почему|можно ли|что (?:такое|будет|умеешь)|объясни|расскажи|подскажи,? как|how|why|explain)(?![\p{L}\p{N}_])""", RegexOption.IGNORE_CASE)
-    private val device = Regex("""(?:(?<![\p{L}\p{N}_])(?:телефон|экран|android|приложени|браузер|настройк|вкладк|фонарик|проводник|кнопк|ярлык|папк|камер|файл|фото|частот[ау]|герцовк|шторк|рабочий стол|тест на|сайт|переписк|личк|контакт|сообщени|desktop|settings|app|browser|screen|folder|flashlight|http|https)|\w+\.(?:ru|com|org)(?![\p{L}\p{N}_]))""", RegexOption.IGNORE_CASE)
+    private val device = Regex("""(?:(?<![\p{L}\p{N}_])(?:телефон|экран|android|приложени|браузер|настройк|вкладк|фонарик|проводник|кнопк|ярлык|папк|камер|файл|фото|частот[ау]|герцовк|шторк|рабочий стол|тест на|сайт|переписк|личк|контакт|сообщени|памят[ьи]|аккумулятор|заряд|батаре|хранилищ|яркост|громкост|bluetooth|desktop|settings|app|browser|screen|folder|flashlight|http|https)|\w+\.(?:ru|com|org)(?![\p{L}\p{N}_]))""", RegexOption.IGNORE_CASE)
     private val generic = Regex("""^(?:напиши|сделай|найди|покажи|прочитай|реши|запиши|исправь|выполни|настрой|напиши мне|write|show|read|find)(?![\p{L}\p{N}_])""", RegexOption.IGNORE_CASE)
     private val resume = Regex("""^(?:(?:давай\s+)?продолж(?:и|ай)(?:\s+(?:задачу|действия))?|возобнови(?:\s+задачу)?|resume(?:\s+task)?)[.!]?$""", RegexOption.IGNORE_CASE)
     private val open = Regex("""^(?:открой|открыть|запусти|запустить|open|launch)\s+(?:приложение\s+|the\s+app\s+)?(.+)$""", RegexOption.IGNORE_CASE)
@@ -126,16 +126,40 @@ internal object VisualRequest {
 
     private val actionPrefix = Regex("^действие:\\s*", RegexOption.IGNORE_CASE)
 
+    fun singleApp(raw: String): String? {
+        val command = cleanCommand(raw)
+        return open.matchEntire(command)?.groupValues?.get(1)?.takeIf {
+            it.length in 2..65 && !it.contains(Regex("[,;→:/]")) &&
+                !it.contains(Regex("""\b(?:и|затем|потом|чтобы|в браузере)\b""", RegexOption.IGNORE_CASE))
+        }
+    }
+
+    fun readsScreen(text: String): Boolean = Regex(
+        """(?:прочитай|что на экране|проанализируй|реши|учи[. ]?ру|read screen|on screen)""", RegexOption.IGNORE_CASE
+    ).containsMatchIn(text)
+
+    private fun cleanCommand(raw: String): String {
+        val goal = goal(raw)
+        return (CortexHotword.command(goal) ?: goal).trim().trimEnd('.', '!', '?')
+            .replace(Regex("""^(?:(?:бро|можешь|пожалуйста|давай)[,\s]+)+""", RegexOption.IGNORE_CASE), "")
+    }
+
     fun isAction(text: String): Boolean {
-        val command = text.trim().trimEnd('.', '!', '?')
+        val command = cleanCommand(text)
+        if (Regex("""\b(?:диагност\p{L}*|проверь|почини|разберись|помоги)\b""", RegexOption.IGNORE_CASE)
+                .containsMatchIn(command) && device.containsMatchIn(command) && !explain.containsMatchIn(command)) return true
+        return actionCommand(text, command)
+    }
+
+    private fun actionCommand(text: String, command: String): Boolean {
         if (text.startsWith("действие:", true) || isResume(text) || home.matches(command) ||
             back.matches(command) || swipe.matches(command) || lock.matches(command) || takePhoto.matches(command)) return true
-        if (explain.containsMatchIn(text) || !action.containsMatchIn(text)) return false
-        return !generic.containsMatchIn(text) || device.containsMatchIn(text)
+        if (explain.containsMatchIn(command) || !action.containsMatchIn(command)) return false
+        return !generic.containsMatchIn(command) || device.containsMatchIn(command)
     }
 
     fun local(text: String, app: (String) -> Boolean): List<VisualStep>? {
-        val command = CortexHotword.command(goal(text))?.takeIf(String::isNotBlank) ?: goal(text)
+        val command = cleanCommand(text)
         val quotedRanges = quoted.findAll(command).map { it.range }.toList()
         val clauses = buildList {
             var start = 0

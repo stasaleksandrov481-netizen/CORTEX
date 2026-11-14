@@ -71,6 +71,7 @@ class CortexIslandBridge(private val activity: Activity, private val web: WebVie
                         val profile = objectValue.optString("profile").takeIf { it in setOf("auto", "fast", "deep") } ?: "auto"
                         prefs.edit().putString("profile", profile)
                             .putBoolean("phoneActions", objectValue.optBoolean("phoneActions", true))
+                            .putBoolean("visualLaunch", objectValue.optBoolean("visualLaunch"))
                             .putBoolean("reduceMotion", objectValue.optBoolean("reduceMotion"))
                             .putBoolean("haptics", objectValue.optBoolean("haptics", true)).apply()
                         if (!prefs.getBoolean(CortexIslandService.WAKE_PAUSED, false) &&

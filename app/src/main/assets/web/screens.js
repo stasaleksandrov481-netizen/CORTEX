@@ -3,13 +3,13 @@
 const CortexUI = (() => {
   const M = Cortex;
   const icon = CortexIcons;
-  const version = "1.0.5";
+  const version = "1.0.6";
   const tabs = [
     ["chat", "Чат", "message"], ["phone-tools", "Вызов", "bolt"], ["home", "Кортекс", ""],
     ["notes", "Заметки", "note"], ["profile", "Профиль", "user"]
   ];
   const parent = {
-    settings: "profile", motion: "settings", voice: "settings", models: "settings", language: "settings",
+    settings: "profile", motion: "settings", models: "settings", language: "settings",
     notifications: "settings", data: "profile", memory: "profile", permissions: "profile",
     support: "profile", about: "profile", privacy: "about", guide: "home", "tool-list": "phone-tools", instructions: "memory", personality: "memory"
   };
@@ -87,8 +87,7 @@ const CortexUI = (() => {
   function home() {
     return `<header class="home-header"><div class="brand">${sign}<span>CORTEX</span></div></header>
       <section class="home-hero" aria-labelledby="home-title">
-        <div class="hero-core" data-home-core aria-hidden="true"><i class="core-halo"></i>
-          <i class="core-orbit"></i><i class="core-orbit"></i><i class="core-orbit"></i>
+        <div class="hero-core" data-home-core aria-hidden="true"><i class="core-orbit"></i><i class="core-orbit"></i><i class="core-orbit"></i>
           <i class="core-glass"></i>${sign}</div>
         <div class="hero-copy"><h1 id="home-title">Чем помочь?</h1></div>
       </section>`;
@@ -115,7 +114,7 @@ const CortexUI = (() => {
         <div class="message-body markdown">${CortexMarkdown.render(message.text)}</div>
         ${message.resumable && index === item.messages.length - 1 ? button("Продолжить", "", "resume-visual", "", "outline") : ""}
         <div class="message-actions">${iconButton("copy", "Копировать ответ", "copy", index)}
-          ${ctx.native ? iconButton("speaker", "Прочитать ответ вслух", "speak", index) : ""}</div></article>`).join("");
+        </div></article>`).join("");
     const pending = ctx.pending ? `<article class="message assistant pending" aria-label="Ответ CORTEX">
       <div class="message-body markdown stream-text" data-stream>${ctx.pending.text ? CortexMarkdown.render(ctx.pending.text) :
       (ctx.pending.action || ctx.pending.waiting ? actionProgress(ctx.pending) : thinking())}</div></article>` : "";
@@ -131,7 +130,7 @@ const CortexUI = (() => {
     </header>
     <div class="scroll conversation" aria-label="Переписка">
       ${messages || pending || error ? `<div class="message-list${ctx.messageEnter ? " entering" : ""}">${messages}${pending}${error}</div>` :
-        `<section class="chat-empty"><div class="chat-empty-signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>${sign}<h1>На связи.</h1><p>Любая задача начинается с вашего сообщения.</p></section>`}
+        `<section class="chat-empty"><div class="chat-empty-signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>${sign}<h1>На связи.</h1></section>`}
     </div>`;
   }
 
@@ -180,7 +179,7 @@ const CortexUI = (() => {
             <span class="google-letter" aria-hidden="true">G</span><span>${ctx.login ? "Ожидаю вход" : "Войти через Google"}</span></button>
             ${ctx.connection.checked && !ctx.connection.google ? '<small class="muted">Вход через Google пока недоступен на сервере.</small>' : ""}` : ""}
         </section>
-        ${group(tile("Настройки", "Голос, телефон и уведомления", "sliders", "go", "settings") +
+        ${group(tile("Настройки", "Телефон, интерфейс и уведомления", "sliders", "go", "settings") +
           tile("Чаты и данные", "История, экспорт и заметки", "folder", "go", "data") +
           tile("Память и персонализация", "Факты, контекст и стиль ответа", "memory", "go", "memory"))}
         ${group(tile("Разрешения Android", "Управляйте доступами по отдельности", "shield", "go", "permissions") +
@@ -191,7 +190,6 @@ const CortexUI = (() => {
   }
   function settings() {
     return detail("Настройки", "", group(
-      tile("Голос", "Озвучка, скачиваемые голоса и разговор", "mic", "go", "voice") +
       tile("Способ вызова CORTEX", "Островок, голос или без плавающего окна", "focus", "go", "phone-tools") +
       tile("Модели ИИ", "Бесплатные профили OpenRouter", "spark", "go", "models") +
       tile("Язык", "Язык ответа и распознавания", "globe", "go", "language") +
@@ -206,52 +204,6 @@ const CortexUI = (() => {
       ${switchRow("Уменьшить движение", "Убрать движение точек и переходы", p.reduceMotion, "reduceMotion")}
       ${switchRow("Тактильный отклик", "Лёгкий импульс при переходе, отправке и записи", p.haptics, "haptics")}
     </section>`);
-  }
-  function voiceCatalog(catalog) {
-    const items = Array.isArray(catalog.items) ? catalog.items : [];
-    const active = catalog.selected || "android";
-    const locked = Boolean(catalog.downloading || catalog.removing || catalog.supported === false);
-    const formatSize = bytes => bytes >= 1000000 ? (bytes / 1000000).toLocaleString("ru-RU", {maximumFractionDigits: 1}) + " МБ"
-      : Math.max(1, Math.ceil(bytes / 1000)) + " КБ";
-    const selected = id => active === id ? '<span class="voice-selected">Выбран</span>'
-      : button("Выбрать", "check", "voice-select", id, "outline");
-    const row = (title, info, actions, progress = "") =>
-      `<article class="voice-pack"><div><h3>${esc(title)}</h3><p>${esc(info)}</p></div>
-        <div class="voice-pack-actions">${actions}</div>${progress}</article>`;
-    const preview = (name, id, locale = "") => M.state.preferences.voiceEnabled && active === id
-      ? iconButton("speaker", "Прослушать голос " + name, "voice-preview", id + "|" + locale, "voice-preview") : "";
-    const android = row("Голос Android", "Из системных настроек телефона", selected("android") + preview("Android", "android"));
-    const packs = items.map(item => {
-      const loading = catalog.downloading === item.id;
-      const installed = item.installed === true;
-      const actions = loading ? `<span class="voice-selected">${esc(catalog.stage || "Устанавливаю")}</span>`
-        : (installed ? selected(item.id) : "") + preview(item.title, item.id, item.language) +
-          (!installed || item.update ? `<button type="button" class="action primary" ${attributes("voice-install", item.id)}
-            ${locked ? "disabled" : ""}>${item.update ? "Обновить" : "Скачать"}</button>` : "") +
-          (installed ? `<button type="button" class="icon-btn voice-preview" ${attributes("voice-remove", item.id)}
-            aria-label="Удалить голос ${esc(item.title)}" ${locked ? "disabled" : ""}>${icon("trash", 17)}</button>` : "");
-      const size = item.size > 0 ? formatSize(item.size) : "";
-      const info = [item.description, size, installed ? "На устройстве" : ""].filter(Boolean).join(" · ");
-      return row(item.title, info, actions, loading
-        ? `<progress data-voice-progress max="100" value="${Number(catalog.progress) || 0}" aria-label="Загрузка голоса"></progress>` : "");
-    }).join("");
-    return `<section class="panel voice-catalog" aria-label="Каталог голосов">
-      <div class="voice-catalog-heading"><h2>Голос Кортекса</h2>${iconButton("refresh", "Обновить список", "voice-catalog")}</div>
-      ${catalog.loading ? '<p class="muted" role="status">Обновляю список…</p>' : ""}
-      ${catalog.supported === false ? '<p class="muted">Скачиваемые голоса требуют 64-битного Android.</p>' : ""}
-      ${catalog.offline ? '<p class="muted" role="status">Каталог недоступен. Можно использовать сохранённые голоса.</p>' : ""}
-      ${catalog.notice ? `<p class="voice-notice" role="status">${esc(catalog.notice)}</p>` : ""}
-      ${android}${packs}</section>`;
-  }
-
-  function voice(ctx) {
-    const p = M.state.preferences;
-    return detail("Голос", "", `<section class="panel stack voice-preferences">
-      ${switchRow("Озвучка Кортекса", "Голосовые ответы в чате и островке", p.voiceEnabled, "voiceEnabled")}
-      ${switchRow("Читать текстовые ответы вслух", "В том числе когда вопрос набран вручную", p.readAloud, "readAloud")}
-      ${switchRow("Продолжать голосовой разговор", "Слушать следующий вопрос после ответа", p.voiceContinue, "voiceContinue")}
-      <div class="voice-speed"><h2>Скорость речи</h2>${choices({"0.85": "Медленнее", "1": "Обычная", "1.15": "Быстрее"}, p.speechSpeed, "speech-speed")}</div>
-    </section>${ctx.native ? voiceCatalog(ctx.voices || {}) : '<p class="muted">Установка голосов доступна в приложении Android.</p>'}`);
   }
   function phoneTools(ctx) {
     const p = M.state.preferences;
@@ -273,19 +225,19 @@ const CortexUI = (() => {
       ["wake", "Появляется по вызову", "Островок появляется только при активации. Слово «Кортекс» включается ниже, в блоке «Голосовое обращение»."],
       ["off", "Без островка", "Управление из приложения и системных способов запуска."]
     ];
-    return `<header class="profile-header"><h1>Вызов CORTEX</h1><p class="section-subtitle">Вы сами решаете, как помощник присутствует на телефоне.</p></header>
+    return `<header class="profile-header"><h1>Вызов CORTEX</h1></header>
       <div class="scroll detail-scroll stack phone-tools-scroll">
         <div class="capability-note"><span class="capability-signal" aria-hidden="true"><i></i><i></i><i></i></span><span>${esc(status)}</span></div>
         ${fix}
         <div class="island-demo" data-camera="${esc(ctx.islandCamera || "drop")}" aria-hidden="true">
           <div class="demo-pill"><span class="demo-rim"></span>
             <div class="demo-body">
-              <div class="demo-state"><span class="demo-face">☺</span>
+              <div class="demo-state"><span class="demo-face">${sign}</span>
                 <span class="demo-wave"><i></i><i></i><i></i><i></i><i></i></span>
                 <span class="demo-text"><b>Слушаю…</b><b>Выполняю…</b><b>Готово</b></span>
               </div>
               <div class="demo-composer">
-                <div class="demo-brand">CORTEX <span class="demo-wave"><i></i><i></i><i></i><i></i><i></i></span>
+                <div class="demo-brand">${sign} CORTEX <span class="demo-wave"><i></i><i></i><i></i><i></i><i></i></span>
                   <span class="demo-actions"><i class="demo-open"></i><i class="demo-close"></i></span></div>
                 <div class="demo-entry">Напиши Кортексу… <span><i class="demo-send"></i></span></div>
               </div>
@@ -302,7 +254,9 @@ const CortexUI = (() => {
         </section>
         ${group(switchRow("Не показывать в горизонтальных приложениях", "Например, во время игр и просмотра видео", p.hideLandscape, "hideLandscape") +
           switchRow("Визуальное управление", "Запускать задачи Android из чата и островка", p.phoneActions, "phoneActions") +
-          voiceRow)}
+          switchRow("Показывать запуск на экране", "Открывать приложения через рабочий стол и быстрые настройки", p.visualLaunch, "visualLaunch") +
+          voiceRow +
+          switchRow("Продолжать голосовой ввод", "Открывать микрофон для следующей команды после ответа", p.voiceContinue, "voiceContinue"))}
         <dl class="voice-commands">
           <div><dt>«Кортекс, убери островок»</dt><dd>Скрыть до следующего вызова</dd></div>
           <div><dt>«Кортекс, выключись»</dt><dd>Остановить задачу и фоновое прослушивание</dd></div>
@@ -316,6 +270,7 @@ const CortexUI = (() => {
   function toolList() {
     return detail("Управление экраном", "Доступность зависит от Android и открытого приложения",
       '<section class="panel stack"><p>Назовите цель или путь по экрану. Например, «Открой Настройки → Дисплей».</p>' +
+      '<p>«Проверь, почему отключается Wi-Fi» запускает проверку сети. «Почини Wi-Fi, включается режим модема» также позволяет изменить связанные переключатели.</p>' +
       '<p>Для действий с отправкой или удалением CORTEX запросит подтверждение. Защищённые экраны требуют ручного ввода.</p></section>');
   }
   function guide() {
@@ -393,8 +348,8 @@ const CortexUI = (() => {
   function notes() {
     return `<header class="profile-header notes-header"><h1>Заметки</h1>
       ${iconButton("plus", "Добавить заметку", "note-edit", "", "accent")}</header>
-      <div class="scroll detail-scroll stack">${M.state.notes.length ? group(M.state.notes.map(item =>
-        tile(item.title, item.body, "note", "note-edit", item.id)).join("")) :
+      <div class="scroll detail-scroll stack notes-scroll">${M.state.notes.length ? group(M.state.notes.map(item =>
+        tile(item.title, item.body, "note", "note-edit", item.id, "note-row")).join("")) :
         `<div class="empty-panel">${icon("note", 29)}<h3>Заметок пока нет</h3>
           ${button("Создать заметку", "plus", "note-edit", "", "primary")}</div>`}</div>`;
   }
@@ -440,15 +395,15 @@ const CortexUI = (() => {
   function privacy(ctx) {
     return detail("Конфиденциальность", "Данные, необходимые для работы", `<section class="panel stack prose">
       <h2>Профиль</h2><p>Для входа CORTEX получает имя, email и фото профиля Google. Имя и фото сохраняются на устройстве для отображения профиля.</p>
-      <h2>Сообщения</h2><p>Сохранённые чаты и заметки остаются на устройстве. При отправке CORTEX передаёт серверу запрос и контекст, выбранный настройками памяти. Сервер обращается к OpenRouter.</p>
-      <h2>Голос и команды</h2><p>Речь распознаёт служба Android. В голосовом разговоре распознанный текст отправляется как сообщение. CORTEX читает элементы и распознаёт текст на телефоне. При вашем согласии для сложной задачи сервер и OpenRouter могут получить краткое описание экрана. Снимки экрана остаются на телефоне.</p>
+      <h2>Сообщения</h2><p>Сохранённые чаты и заметки остаются на устройстве. Команды, которые выполняет локальный движок, остаются на телефоне. Для разговорных ответов и сложных задач CORTEX передаёт серверу запрос и нужный контекст. Сервер обращается к OpenRouter.</p>
+      <h2>Голос и команды</h2><p>Речь распознаёт служба Android. Распознанная команда проходит ту же обработку, что и текстовая. CORTEX читает элементы и распознаёт текст на телефоне. При вашем согласии для сложной задачи сервер и OpenRouter могут получить краткое описание экрана. Снимки экрана остаются на телефоне.</p>
       ${window.CortexDevice ? button(ctx.connection.visualPrivacy ? "Отключить передачу текста экрана ИИ" : "Разрешить передачу текста экрана ИИ", "shield", "visual-privacy", "", "outline") : ""}
       <h2>Поддержка</h2><p>Разработчик получает текст обращения и приложенные вами email, скриншот и версию приложения.</p>
     </section>`);
   }
 
   function page(route, ctx) {
-    const pages = { home, chat, profile, settings, motion, voice, "phone-tools": phoneTools, language, notifications,
+    const pages = { home, chat, profile, settings, motion, "phone-tools": phoneTools, language, notifications,
       data, memory, personality, instructions, notes, permissions, support, about, privacy, guide, models, "tool-list": toolList };
     return pages[route](ctx);
   }

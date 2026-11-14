@@ -18,6 +18,12 @@ internal object CortexPhoneResult {
                     "battery" -> result.optInt("level", -1).takeIf { it in 0..100 }?.let {
                         "Заряд — $it%." + if (result.optBoolean("charging")) " Телефон заряжается." else ""
                     } ?: "Android не сообщил уровень заряда."
+                    "storage" -> {
+                        val free = result.optLong("free", -1L)
+                        val total = result.optLong("total", -1L)
+                        if (free < 0 || total <= 0) "Android не сообщил объём памяти."
+                        else String.format(java.util.Locale.forLanguageTag("ru"), "Свободно %.1f из %.1f ГБ.", free / 1e9, total / 1e9)
+                    }
                     "wifi" -> if (result.optBoolean("enabled")) "Wi-Fi включён." else "Wi-Fi выключен."
                     else -> result.optString("value", "Состояние получено от Android.")
                 }

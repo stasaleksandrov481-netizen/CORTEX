@@ -57,9 +57,9 @@ const CortexMotion = (() => {
     if (!from || !to || !from.w || !to.w) return null;
     const x = from.x + from.w / 2, y = from.y + from.h / 2;
     const tx = to.x + to.w / 2, ty = to.y + to.h / 2;
-    const duration = 850;
+    const duration = 580;
     const dist = Math.hypot(tx - x, ty - y);
-    const count = 140;
+    const count = 74;
     const particles = Array.from({ length: count }, (_, i) => ({
       angle: i * 2.39996322973, orbit: 11 + (i * 17 % 51), radius: .58 + (i * 19 % 17) / 18,
       lane: i % 6, trail: (i * 13 % 25) / 100
@@ -117,13 +117,13 @@ const CortexMotion = (() => {
   }
 
   function page(surface, direction, tab) {
-    const distance = tab ? 25 * direction : 0;
-    const axis = tab ? 4 : 12;
+    const distance = tab ? 17 * direction : 0;
+    const rise = tab ? 5 : 10;
     return surface.animate([
-      { opacity: .10, transform: `translate3d(${distance}px,${axis}px,0) scale(.991)` },
-      { opacity: .86, transform: `translate3d(${distance * .19}px,1px,0) scale(1)`, offset: .63 },
+      { opacity: .25, transform: `translate3d(${distance}px,${rise}px,0) scale(.99)` },
+      { opacity: 1, transform: `translate3d(${-.7 * direction}px,0,0) scale(1.001)`, offset: .82 },
       { opacity: 1, transform: "none" }
-    ], { duration: tab ? 315 : 260, easing: "cubic-bezier(.2,.69,.22,1)" });
+    ], { duration: tab ? 345 : 285, easing: "cubic-bezier(.2,.74,.22,1)" });
   }
 
   const presses = new WeakMap();

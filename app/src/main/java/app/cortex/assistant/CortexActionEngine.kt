@@ -5,8 +5,10 @@ import android.content.Context
 import android.graphics.Rect
 import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -25,6 +27,7 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
     private val context = context.applicationContext
     private val gateway = CortexServerBridge(this.context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val phone by lazy { CortexPhoneActions(this.context) }
     private val preferences = context.getSharedPreferences("cortex-display", Context.MODE_PRIVATE)
     private var job: Job? = null
 
@@ -35,6 +38,7 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
         profile: String,
         force: Boolean = false,
         allowPhone: Boolean = true,
+        source: String = "island",
         beforeScreen: () -> Unit = {},
         progress: (String) -> Unit = {},
         finished: (Result) -> Unit
@@ -44,56 +48,78 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             finished(Result(it, true))
             return true
         }
-        if (!allowPhone) return false
         val resumeText = VisualRequest.isResume(text)
-        val reply = saved?.takeIf { !resumeText && it.question.isNotBlank() && text.length <= 200 &&
-            !VisualRequest.isAction(text) && !text.endsWith('?') }
-        if (!force && !resumeText && reply == null && !VisualRequest.isAction(text)) return false
-        val service = CortexScreenService.connected
-        if (service == null) {
-            finished(Result("Включите «CORTEX — управление экраном» в специальных возможностях Android и повторите запрос.", false))
+        val network = NetworkRequest.parse(text)
+        val command = VisualRequest.goal(text)
+        val action = VisualRequest.isAction(text)
+        if (!allowPhone) {
+            if (!action && network == null && !force) return false
+            finished(Result("Управление телефоном выключено. Его можно включить в разделе «Вызов».", false))
             return true
         }
-        if (service.locked()) {
-            finished(Result("Разблокируйте телефон, чтобы начать задачу.", false))
-            return true
-        }
+        val direct = if (!resumeText && network == null) parseSystem(command) else null
+        val reply = saved?.takeIf { !resumeText && it.source == source && it.question.isNotBlank() &&
+            SystemClock.uptimeMillis() - it.pausedAt < 180_000L && text.length <= 2_000 &&
+            (text.startsWith('«') || text.startsWith('"') || (!action && network == null && !text.endsWith('?'))) }
+        if (!force && !resumeText && reply == null && network == null && direct == null && !action) return false
         if (job?.isActive == true || !CortexActionState.acquire(::cancel)) {
             finished(Result(if (CortexActionState.gate == "open") "Сначала остановите текущую задачу CORTEX."
                 else "Управление недоступно во время обновления или обслуживания.", false))
             return true
         }
-        val state = if (resumeText || reply != null) saved else null
-        val task = state?.copy(plans = 0, failures = linkedSetOf()) ?: Task(VisualRequest.goal(text), profile)
+
+        val service = CortexScreenService.connected
+        val state = if (resumeText || reply != null) saved?.takeIf { paused ->
+            paused.source == source || resumeText && paused.question.isBlank() && paused.conversation == null
+        } else null
+        val task = state?.copy(plans = 0, failures = linkedSetOf()) ?: Task(command, profile, source)
         if (reply != null) {
-            task.request += "\nВыбор пользователя: $text"
+            task.conversation = task.conversation?.withAnswer(text)
+            if (task.conversation == null) {
+                task.request += "\nВыбор пользователя: $text"
+                task.lastIssue = "Пользователь ответил на уточняющий вопрос: ${reply.question.take(180)}"
+            }
             task.question = ""
             task.queue.clear()
             task.boundScreen = null
-            task.lastIssue = "Пользователь ответил на уточняющий вопрос: ${reply.question.take(180)}"
         }
-        if (state != null) task.question = ""
-        saved = null
-        job = scope.launch {
+        if (resumeText && task.local && task.queue.isEmpty()) {
+            task.queue.addAll(task.deferred)
+            task.deferred = emptyList()
+            task.lastIssue = ""
+        }
+        if (state != null) saved = null
+        else if (saved?.source == source) saved = null
+
+        job = scope.launch(start = CoroutineStart.LAZY) {
             var result = Result("Задача остановлена.", false)
             var preserve = false
+            fun report(message: String) {
+                if (CortexActionState.status?.message == message && CortexActionState.status?.phase == "executing") return
+                CortexActionState.report(context, "executing", message)
+                progress(message)
+            }
             try {
-                if (resumeText && state == null) {
-                    result = Result("Нет приостановленной задачи. Скажите, что нужно сделать.", false)
-                } else {
-                    beforeScreen()
-                    fun report(message: String) {
-                        CortexActionState.report(context, "executing", message)
-                        progress(message)
+                result = withTimeout(232_000L) {
+                    when {
+                        resumeText && state == null ->
+                            Result("Нет приостановленной задачи. Скажите, что нужно сделать.", false)
+                        network != null && reply == null ->
+                            PhoneNetwork(context).run(network, service, beforeScreen, ::report)
+                        service?.locked() == true && direct?.all { it.optString("kind") in READ_ONLY } != true ->
+                            Result("Разблокируйте телефон, чтобы начать задачу.", false, state != null)
+                        direct != null && reply == null ->
+                            executeSystem(direct, beforeScreen, ::report)
+                        service == null -> Result(
+                            "Включите «CORTEX — управление экраном» в специальных возможностях Android и повторите запрос.",
+                            false, state != null)
+                        else -> execute(task, service, beforeScreen, ::report)
                     }
-                    report("Проверяю доступ к экрану…")
-                    delay(520L)
-                    result = withTimeout(232_000L) { execute(task, service, ::report) }
-                    preserve = result.resumable
                 }
+                preserve = result.resumable
             } catch (_: TimeoutCancellationException) {
-                result = Result("Время задачи истекло. Можно продолжить с текущего экрана.", false, true)
-                preserve = true
+                preserve = task.queue.isNotEmpty() || task.plans > 0
+                result = Result("Android не подтвердил задачу за отведённое время.", false, preserve)
             } catch (_: CancellationException) {
                 preserve = task.completed > 0 || task.queue.isNotEmpty() || task.plans > 0
                 result = Result(if (preserve) "Задача остановлена. Можно продолжить с текущего экрана."
@@ -101,19 +127,21 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             } catch (error: Exception) {
                 android.util.Log.w("CortexVisual", "Task failed: ${error.javaClass.simpleName}")
                 preserve = task.queue.isNotEmpty()
-                result = Result("Не удалось получить подтверждение Android." +
-                    if (preserve) " Проверьте экран и продолжите задачу." else "", false, preserve)
+                result = Result("Не удалось получить подтверждение Android.", false, preserve)
             } finally {
-                if (!result.ok) service.stopTouch()
+                if (!result.ok) service?.stopTouch()
                 if (preserve) {
-                    val interrupted = task.inFlight
-                    if (interrupted != null) {
-                        task.deferred = task.queue.drop(1)
+                    task.inFlight?.let { interrupted ->
+                        task.deferred = if (task.local) {
+                            if (interrupted.action in REPEATABLE) task.queue.toList() else emptyList()
+                        } else task.queue.drop(1)
                         task.queue.clear()
                         task.lastIssue = "Последний шаг мог выполниться. Сверь экран перед продолжением."
                     }
                     task.inFlight = null
-                    saved = task
+                    task.pausedAt = SystemClock.uptimeMillis()
+                    if (task.local && task.queue.isEmpty() && task.deferred.isEmpty()) preserve = false
+                    if (preserve && !preferences.getBoolean(CortexIslandService.WAKE_PAUSED, false)) saved = task
                 }
                 job = null
                 val phase = when {
@@ -121,26 +149,78 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
                     result.text.startsWith("Задача остановлена") -> "stopped"
                     else -> "error"
                 }
-                val status = if (result.ok) "Задача выполнена" else result.text.take(180)
-                CortexActionState.log(context, if (result.ok) "Визуальная задача выполнена · шагов: ${task.completed}"
-                    else "Визуальная задача прервана · шагов: ${task.completed}")
-                CortexActionState.report(context, phase, status)
+                val status = result.text
+                CortexActionState.log(context, if (result.ok) "Команда выполнена · шагов экрана: ${task.completed}"
+                    else "Команда завершена без подтверждения цели · шагов экрана: ${task.completed}")
+                CortexActionState.report(context, phase, status, showResult = !CortexRuntime.appVisible)
                 finished(result)
             }
         }
+        job?.start()
         return true
     }
 
-    private suspend fun execute(task: Task, service: CortexScreenService, report: (String) -> Unit): Result {
+    private fun parseSystem(command: String): List<JSONObject>? {
+        val visual = preferences.getBoolean("visualLaunch", false)
+        return CortexLocalCommands.parse(command) { name ->
+            if (visual || CortexScreenService.connected != null) null else phone.resolveApp(name)?.pkg
+        }?.takeIf { steps ->
+            steps.all { step ->
+                when (step.optString("kind")) {
+                    "read_device", "volume", "recents", "play_store" -> true
+                    "torch" -> !visual || CortexScreenService.connected == null
+                    "settings" -> !visual && step.optString("target") != "system"
+                    "app" -> CortexScreenService.connected == null
+                    else -> false
+                }
+            }
+        }
+    }
+
+    private suspend fun executeSystem(
+        steps: List<JSONObject>, beforeScreen: () -> Unit, report: (String) -> Unit
+    ): Result = suspendCancellableCoroutine { pending ->
+        if (steps.any { it.optString("kind") in SYSTEM_NAVIGATION }) beforeScreen()
+        CortexActionSequence(steps, { pending.isActive }, { step, _, _, done ->
+            report(when (step.optString("kind")) {
+                "read_device" -> "Проверяю состояние телефона…"
+                "torch" -> "Проверяю фонарик…"
+                "volume" -> "Меняю громкость…"
+                else -> "Выполняю команду Android…"
+            })
+            phone.executeChecked(step, { pending.isActive }, done)
+        }) { result ->
+            if (pending.isActive) pending.resume(Result(result.text, result.ok))
+        }.start()
+    }
+
+    private suspend fun execute(
+        task: Task, service: CortexScreenService, beforeScreen: () -> Unit, report: (String) -> Unit
+    ): Result {
         val navigation = VisualNavigation(context, service)
-        if (task.completed == 0 && task.queue.isEmpty() && task.plans == 0 && task.lastIssue.isBlank()) {
+        val conversation = task.conversation ?: ConversationRequest.parse(task.request) { navigation.resolve(it) != null }
+        if (conversation != null) {
+            task.conversation = conversation
+            task.question = conversation.question
+            if (task.question.isNotBlank()) return Result(task.question, false, true)
+            beforeScreen()
+            return ConversationNavigation(service, navigation, ::confirm).run(conversation, report)
+        }
+        if (task.completed == 0 && task.queue.isEmpty() && task.plans == 0 && task.lastIssue.isBlank() && !task.local) {
             if (isSchoolSite(task.request) && !browserSpecified(task.request)) {
                 task.question = "В каком браузере открыт ваш аккаунт Учи.ру?"
                 return Result(task.question, false, true)
             }
             val local = VisualRequest.local(task.request) { navigation.resolve(it) != null }
-            if (local != null) task.queue.addAll(local)
+            if (local != null) {
+                task.local = true
+                task.queue.addAll(local)
+            } else VisualRequest.singleApp(task.request)?.let { missing ->
+                return Result("Приложение «$missing» не найдено. Уточните его название.", false)
+            }
         }
+        beforeScreen()
+        report("Проверяю текущий экран…")
         var feedback = task.lastIssue
         var runSteps = 0
         while (runSteps < 40) {
@@ -150,10 +230,14 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
                     feedback = VERIFIED_STAGE
                     task.lastIssue = feedback
                 }
-                if (task.plans >= 7) break
-                val frame = service.frame()
+                if (task.local) return Result(feedback.ifBlank { "Локальная цепочка завершилась без подтверждения." }, false)
+                if (task.plans >= MAX_PLANS) break
+                val frame = service.frame()?.takeUnless { it.pkg == context.packageName }
+                    ?: navigation.await(550L) { it.pkg != context.packageName }
                 if (frame?.secure == true || frame?.hasPrivateFields == true || service.locked()) return manual()
-                val useFrame = frame != null && frame.pkg != context.packageName &&
+                val explicitReading = VisualRequest.readsScreen(task.request)
+                val needsScreen = explicitReading || feedback == READ_SCREEN || task.plans > 0 && feedback.isNotBlank()
+                val useFrame = needsScreen && frame != null && frame.pkg != context.packageName &&
                     frame.pkg !in navigation.home && !frame.hasPrivateFields
                 if (useFrame && !screenConsent(report)) {
                     return Result("Анализ текста экрана отклонён. Можно продолжить с текущего экрана.", false, true)
@@ -166,14 +250,14 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
                 val screen = if (useFrame) {
                     val current = navigation.await { it.pkg == frame.pkg && it.window == frame.window && !it.hasPrivateFields }
                     if (current == null) null else {
-                        val result = augment(current, service)
+                        val result = if (current.tree.count { it.label.isNotBlank() } < 5) augment(current, service) else current
                         if (result.secure || result.hasPrivateFields) return manual()
                         result.takeIf { it.pkg == current.pkg && it.window == current.window }
                     }
                 } else null
                 if (screen != null && isSchoolSite(task.request)) report("Ищу решение…")
                 task.modelUsed = true
-                val result = plan(task, navigation, screen, feedback)
+                val result = plan(task, navigation, service, screen, feedback, explicitReading)
                 val plan = result.first ?: return Result(
                     if (feedback.isNotBlank() && feedback != VERIFIED_STAGE && feedback != READ_SCREEN) "$feedback ${result.second}"
                     else result.second, false, true)
@@ -211,7 +295,7 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             task.boundScreen = null
             if ((binding == null && step.target.startsWith('#')) ||
                 (binding != null && (frame?.pkg != binding.pkg || frame.window != binding.window ||
-                    frame.revision != binding.revision || frame.structure() != binding.structure()))) {
+                    frame.structure() != binding.structure()))) {
                 task.deferred = task.queue.drop(1)
                 task.queue.clear()
                 feedback = "Экран изменился, пока модель строила план. Проверь текущие элементы."
@@ -237,8 +321,11 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             if (outcome.ok) {
                 if (step.action != VisualAction.READ) {
                     task.completed++
-                    task.verified.addLast("${step.action.name}: ${VisualLabels.forModel(step.target)}")
-                    if (task.verified.size > 20) task.verified.removeFirst()
+                    task.verified.addLast(when (step.action) {
+                        VisualAction.OPEN -> "OPEN: ${VisualLabels.forModel(step.target)}"
+                        else -> step.action.name
+                    })
+                    if (task.verified.size > 8) task.verified.removeFirst()
                 }
                 if (task.queue.isEmpty() && task.question.isNotBlank()) return Result(task.question, false, true)
                 if (step.action != VisualAction.READ) {
@@ -249,6 +336,12 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             }
             if (!outcome.ok) task.failures += attempt
             if (outcome.stop) return Result(outcome.message, false)
+            if (task.local && !outcome.ok && !outcome.manual) {
+                val repeatable = outcome.retry && step.action in REPEATABLE
+                task.deferred = if (repeatable) listOf(step) + task.queue.toList() else emptyList()
+                task.queue.clear()
+                return Result(outcome.message.ifBlank { "Android не подтвердил шаг." }, false, task.deferred.isNotEmpty())
+            }
             if (outcome.manual) {
                 task.queue.addFirst(step)
                 return manual()
@@ -282,7 +375,7 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             VisualAction.OPEN -> {
                 val app = navigation.resolve(step.target)
                     ?: return result(false, "На телефоне не найден ярлык «${step.target}».")
-                return result(navigation.open(app, report), "Ярлык «${app.label}» не удалось открыть с рабочего стола.")
+                return result(navigation.open(app, report, preferences.getBoolean("visualLaunch", false)), "Ярлык «${app.label}» не удалось открыть с рабочего стола.")
             }
             VisualAction.QUICK_SETTINGS -> {
                 report("Открываю быстрые настройки…")
@@ -311,7 +404,7 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             }
             else -> Unit
         }
-        val before = boundScreen ?: navigation.await { it.pkg != context.packageName || step.action == VisualAction.BACK }
+        val before = boundScreen ?: navigation.await { it.pkg != context.packageName }
             ?: return result(false, "Android пока не предоставил доступный экран.")
         if (before.secure || before.hasPrivateFields) return StepOutcome(false, manual().text, manual = true)
         return when (step.action) {
@@ -344,14 +437,6 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
         }
         if (node == null) {
             report("Ищу «${step.target}»…")
-            before = augment(before, service)
-            if (before.secure || before.hasPrivateFields) return StepOutcome(false, manual().text, manual = true)
-            if (before.pkg != frame.pkg || before.window != frame.window) {
-                return StepOutcome(false, "Открытый экран изменился во время поиска элемента.")
-            }
-            node = findTarget(before, step.target)
-        }
-        if (node == null) {
             val scroll = before.tree.filter { it.scrollable && it.enabled }.maxByOrNull { area(it.bounds) }
             if (scroll != null) {
                 val seen = mutableSetOf(before.structure())
@@ -368,6 +453,14 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
                 }
             }
         }
+        if (node == null && step.action == VisualAction.TAP) {
+            before = augment(before, service)
+            if (before.secure || before.hasPrivateFields) return StepOutcome(false, manual().text, manual = true)
+            if (before.pkg != frame.pkg || before.window != frame.window) {
+                return StepOutcome(false, "Открытый экран изменился во время поиска элемента.")
+            }
+            node = findTarget(before, step.target)
+        }
         val target = node ?: return StepOutcome(false, "Элемент «${step.target}» не найден на текущем экране.")
         val label = target.label.ifBlank { target.description }.ifBlank { step.target }
         val risk = VisualSafety.risk(task.request, step, label, target.resource, target.role)
@@ -383,7 +476,6 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             if (!confirm("Подтвердите действие", "«$label»\n\nВаша задача: ${task.request.take(240)}", "Выполнить")) {
                 return StepOutcome(false, "Действие отменено пользователем.", stop = true)
             }
-            delay(400L)
             val fresh = navigation.await { it.pkg == before.pkg && it.window == before.window &&
                 !it.secure && !it.hasPrivateFields }
                 ?: return StepOutcome(false, "После подтверждения открыт другой экран.", retry = false)
@@ -392,8 +484,9 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
         val current = before.nodes.firstOrNull { it.path == target.path && it.ocr == target.ocr && it.label == target.label &&
             it.resource == target.resource && Rect.intersects(it.bounds, target.bounds) } ?: return StepOutcome(false,
             "Элемент «$label» изменился до нажатия.")
+        if (requested != null && checkState(before, current) == requested) return StepOutcome(true)
         report(if (requested == null) "Нажимаю «$label»…" else (if (requested) "Включаю" else "Выключаю") + " «$label»…")
-        if (!service.tap(before, current)) return StepOutcome(false, "Android отклонил нажатие «$label».")
+        if (!(service.click(before, current) || service.tap(before, current))) return StepOutcome(false, "Android отклонил нажатие «$label».")
         report("Проверяю результат…")
         val verified = when {
             requested != null -> navigation.await { fresh ->
@@ -437,7 +530,6 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             return StepOutcome(false, "Поле содержит недопустимые символы.")
         }
         report("Вставляю текст…")
-        if (!node.focused && service.tap(before, node)) delay(230L)
         if (!service.setText(before, node, step.value)) return StepOutcome(false, "Android не разрешил ввод в это поле.")
         report("Проверяю введённый текст…")
         val verified = navigation.await { it.pkg == before.pkg && service.fieldMatches(before, node, step.value) } != null
@@ -498,7 +590,7 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
 
     private suspend fun augment(frame: VisualFrame, service: CortexScreenService): VisualFrame {
         val result = withTimeoutOrNull(5_500L) { service.recognize(frame) } ?: return frame
-        val current = service.frame() ?: return frame
+        val current = service.frame(fresh = true) ?: return frame
         if (current.pkg != frame.pkg || current.window != frame.window || current.structure() != frame.structure()) return current
         return current.copy(nodes = current.tree + result.nodes, secure = current.secure || result.protected)
     }
@@ -528,15 +620,32 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             }
         } == true
 
-    private suspend fun plan(task: Task, navigation: VisualNavigation, frame: VisualFrame?, feedback: String): Pair<VisualPlan?, String> {
+    private suspend fun plan(
+        task: Task, navigation: VisualNavigation, service: CortexScreenService, frame: VisualFrame?,
+        feedback: String, includeReading: Boolean
+    ): Pair<VisualPlan?, String> {
         task.plans++
-        val user = JSONObject().put("request", task.request)
-            .put("screen", frame?.modelData() ?: JSONObject.NULL)
-            .put("installed_apps", JSONArray(navigation.apps.sortedBy { it.label }.take(100).map { it.label }))
+        val namedApps = navigation.apps.filter { app ->
+            VisualLabels.score(task.request, app.label) >= 82 ||
+                task.request.contains(app.pkg, ignoreCase = true)
+        }.take(6)
+        val device = CortexDeviceContext.runtime(context, service, true)
+        service.activePackage()?.let { foreground ->
+            device.put("foreground", when {
+                foreground == context.packageName -> "CORTEX"
+                foreground in navigation.home -> "launcher"
+                namedApps.any { it.pkg == foreground } -> foreground
+                else -> "other_android_app"
+            })
+        }
+        val user = JSONObject().put("request", task.request.take(2_400))
+            .put("device", device)
             .put("verified_steps", JSONArray(task.verified))
-            .put("previous_issue", feedback.take(480))
-            .put("remaining_previous_steps", JSONArray(task.deferred.map { "${it.action.name}: ${it.target}" }))
-        val messages = JSONArray().put(JSONObject().put("role", "system").put("content", PLANNER))
+        if (frame != null) user.put("screen", frame.modelData(includeReading = includeReading))
+        if (namedApps.isNotEmpty()) user.put("matching_apps", JSONArray(namedApps.map { it.label }))
+        if (feedback.isNotBlank()) user.put("previous_issue", VisualLabels.forModel(feedback).take(320))
+        if (task.deferred.isNotEmpty()) user.put("remaining_step_types", JSONArray(task.deferred.map { it.action.name }))
+        val messages = JSONArray().put(JSONObject().put("role", "system").put("content", CortexDeviceContext.IDENTITY + "\n" + PLANNER))
             .put(JSONObject().put("role", "user").put("content", user.toString()))
         val payload = JSONObject().put("messages", messages).put("style", "balanced")
             .put("profile", if (task.profile == "deep") "deep" else "fast")
@@ -585,10 +694,14 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
     private data class Task(
         var request: String,
         val profile: String,
+        val source: String,
         val queue: ArrayDeque<VisualStep> = ArrayDeque(),
         val failures: MutableSet<Attempt> = linkedSetOf(),
         val verified: ArrayDeque<String> = ArrayDeque(),
         var completed: Int = 0,
+        var local: Boolean = false,
+        var pausedAt: Long = 0L,
+        var conversation: ConversationRequest? = null,
         var plans: Int = 0,
         var lastIssue: String = "",
         var question: String = "",
@@ -600,8 +713,14 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
         var inFlight: VisualStep? = null
     )
 
-    private companion object {
-        var saved: Task? = null
+    companion object {
+        private var saved: Task? = null
+        fun clearPaused() { saved = null }
+        private const val MAX_PLANS = 2
+        private val READ_ONLY = setOf("read_device")
+        private val SYSTEM_NAVIGATION = setOf("app", "close_app", "home", "recents", "settings", "play_store")
+        private val REPEATABLE = setOf(VisualAction.HOME, VisualAction.OPEN, VisualAction.SET, VisualAction.EXPECT,
+            VisualAction.QUICK_SETTINGS)
         const val READ_SCREEN = "Прочитай текущий экран. Используй видимые условия и элементы для следующего шага."
         const val VERIFIED_STAGE = "Предыдущие шаги подтверждены Android. Сверь цель и продолжи или укажи done:true."
         val SCREEN_STEPS = setOf(VisualAction.BACK, VisualAction.TAP, VisualAction.SET, VisualAction.TYPE,
@@ -619,8 +738,11 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
             Схема: {"steps":[{"action":"open|home|back|quick_settings|tap|set|type|submit|scroll|swipe|read|expect|lock",
             "target":"точная подпись либо #id с экрана", "value":"текст или параметр", "expect":"видимая подпись после действия",
             "confirm":false}],"question":"","answer":"","done":false}. Необязательные поля можно опустить.
-            open принимает название установленного приложения и открывает его через рабочий стол. Для переходов внутри
-            приложения используй только видимые элементы. Если экран ещё неизвестен, закончи этап read, чтобы получить новый.
+            open принимает название установленного приложения. Для переходов внутри приложения используй подписи элементов
+            или стабильные системные названия, если экран ещё не открыт. Используй read только если без данных экрана
+            следующий шаг определить нельзя. Сначала составь всю надёжную последовательность, Android сам проверит каждый шаг.
+            Для диагностики устройства начни с проверяемого признака и конкретного действия в Android. Назови причины как
+            возможные, пока экран и результаты не подтвердили их. Не придумывай выполненных действий.
             tap нажимает элемент по подписи. Идентификатор #id годится только для первого действия на переданном экране.
             type заменяет текст редактируемого поля. Пропусти target для единственного или активного поля.
             submit запускает действие клавиатуры для активного поля. Для сайта набери адрес в браузере и отправь ввод.

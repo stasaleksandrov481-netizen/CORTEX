@@ -3,9 +3,9 @@
 const Cortex = (() => {
   const key = "cortex.interface.v2";
   const instructionFields = [
-    { id: "goal", label: "Задача", value: "Помогай разбираться в задачах, находить понятные объяснения и планировать действия." },
+    { id: "goal", label: "Задача", value: "Выполняй запросы на телефоне, проверяй результат и помогай разбираться в задачах." },
     { id: "reply", label: "Ответы", value: "Начинай с сути. Для сложной задачи предложи короткий план и уточни важные детали." },
-    { id: "actions", label: "Действия", value: "Действуй на экране только по запросу пользователя." },
+    { id: "actions", label: "Действия", value: "При запросе действия используй возможности Android и сообщай проверенный результат." },
     { id: "confirm", label: "Уточнения", value: "Если запрос неоднозначен, задай один вопрос, который сильнее всего меняет ответ." }
   ];
   const styles = { brief: "Кратко", balanced: "Сбалансированно", deep: "Подробно" };
@@ -14,9 +14,9 @@ const Cortex = (() => {
   const models = { auto: "Авто", fast: "Быстро", deep: "Подробно" };
   const defaults = {
     quality: "balanced", reduceMotion: false, autoSaveChats: true, rememberSaved: true,
-    language: "auto", haptics: true, readAloud: false, voiceEnabled: true, voiceContinue: true,
-    phoneActions: true, model: "auto", speechSpeed: "1", notifyReplies: false,
-    overlayMode: "off", hideLandscape: true, hotwordEnabled: false, silentWake: false
+    language: "auto", haptics: true, voiceContinue: true,
+    phoneActions: true, visualLaunch: false, model: "auto", notifyReplies: false,
+    overlayMode: "off", hideLandscape: true, hotwordEnabled: false
   };
   const array = input => Array.isArray(input) ? input : [];
   const object = input => input && typeof input === "object" && !Array.isArray(input) ? input : {};
@@ -70,7 +70,6 @@ const Cortex = (() => {
   if (!Object.hasOwn(models, preferences.model)) preferences.model = defaults.model;
   if (!Object.hasOwn(languages, preferences.language)) preferences.language = defaults.language;
   if (!["always", "wake", "off"].includes(preferences.overlayMode)) preferences.overlayMode = "off";
-  if (!["0.85", "1", "1.15"].includes(preferences.speechSpeed)) preferences.speechSpeed = defaults.speechSpeed;
   const state = {
     preferences,
     edits: { cortex: object(persisted.edits?.cortex) },
@@ -144,14 +143,14 @@ const Cortex = (() => {
     const matches = [
       ...earlier.map(message => ({ message, source: "Этот чат", priority: 1 })),
       ...saved.flatMap(item => item.messages.filter(message => !message.local)
-        .map(message => ({ message, source: item.title, priority: 0 })))
+        .map(message => ({ message, source: "Сохранённый чат", priority: 0 })))
     ].map(item => {
       const text = item.message.text.toLowerCase().replace(/ё/g, "е");
       return { ...item, score: keywords.filter(word => text.includes(word)).length * 3 + item.priority };
-    }).filter(item => item.score >= 3).sort((a, b) => b.score - a.score).slice(0, 7);
+    }).filter(item => item.score >= 3).sort((a, b) => b.score - a.score).slice(0, 4);
     if (!matches.length && saved.length && /(вспомни|помнишь|ранее|раньше|обсуждали)/iu.test(query)) {
       const latest = saved.sort((a, b) => b.updated.localeCompare(a.updated))[0];
-      matches.push(...latest.messages.filter(message => !message.local).slice(-4).map(message => ({ message, source: latest.title })));
+      matches.push(...latest.messages.filter(message => !message.local).slice(-4).map(message => ({ message, source: "Сохранённый чат" })));
     }
     return matches.map(({message, source}) => "[" + source.slice(0, 72) + "] " +
       (message.role === "user" ? "Пользователь: " : "Ассистент: ") + message.text.slice(0, 680)).join("\n");
@@ -161,12 +160,12 @@ const Cortex = (() => {
     const person = profile();
     const data = memory();
     const savedRules = object(state.instructions.cortex);
-    const facts = data.enabled ? data.entries.filter(item => item.enabled !== false).slice(0, 24)
+    const facts = data.enabled ? data.entries.filter(item => item.enabled !== false).slice(0, 10)
       .map(item => string(item.title, 64) + " — " + string(item.value, 220)).join("\n") : "";
     const conversation = chat.messages.filter(message => !message.local);
     let start = conversation.length;
-    let budget = 34000;
-    while (start > 0 && conversation.length - start < 28) {
+    let budget = 12000;
+    while (start > 0 && conversation.length - start < 12) {
       const length = conversation[start - 1].text.length;
       if (length > budget && start < conversation.length) break;
       start--;

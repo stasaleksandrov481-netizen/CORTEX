@@ -41,29 +41,26 @@ internal class IslandConversationPanel(
     private val status = label(10.5f, 0xFFC6C6C6.toInt())
     private val signal = Signal()
     private val response = label(14.5f, 0xFFF0F0F0.toInt())
-    private val answerScroll = object : ScrollView(context) {
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val maximum = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.UNSPECIFIED) dp(147)
-            else minOf(dp(147), MeasureSpec.getSize(heightMeasureSpec))
-            super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(maximum, MeasureSpec.AT_MOST))
-        }
-    }
+    private val answerScroll = ScrollView(context)
+    private val header = LinearLayout(context)
     private val editor = EditText(context)
     private val entry = Entry()
     private val sendButton = Glyph("send", "Отправить", true)
     private var busy = false
     private var answer = ""
     private var motion = ValueAnimator.areAnimatorsEnabled()
-    var onInteraction: ((Float) -> Unit)? = null
+    var onKeyboardFocus: ((Boolean) -> Unit)? = null
 
     init {
         orientation = VERTICAL
-        setPadding(dp(17), dp(9), dp(15), dp(14))
+        setPadding(dp(15), dp(8), dp(13), dp(12))
+        isSoundEffectsEnabled = false
+        isFocusableInTouchMode = true
         isClickable = true
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         descendantFocusability = FOCUS_AFTER_DESCENDANTS
 
-        val header = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+        header.gravity = Gravity.CENTER_VERTICAL
         val identity = LinearLayout(context).apply {
             orientation = VERTICAL
             gravity = Gravity.CENTER_VERTICAL
@@ -84,32 +81,29 @@ internal class IslandConversationPanel(
         identity.addView(status, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = dp(3) })
         header.addView(identity, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(4) })
         header.addView(Glyph("open", "Открыть приложение").apply { setOnClickListener { openApp() } },
-            LayoutParams(dp(39), dp(43)))
+            LayoutParams(dp(44), dp(44)))
         header.addView(Glyph("close", "Свернуть островок").apply { setOnClickListener { close() } },
-            LayoutParams(dp(39), dp(43)))
+            LayoutParams(dp(44), dp(44)))
         addView(header, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
 
         answerScroll.apply {
             isFillViewport = false
             isVerticalScrollBarEnabled = true
             overScrollMode = OVER_SCROLL_NEVER
-            visibility = GONE
-            background = GradientDrawable().apply {
-                setColor(0xFF1B1B1B.toInt())
-                cornerRadius = dp(18).toFloat()
-                setStroke(dp(1), 0xFF3A3A3A.toInt())
-            }
+            visibility = INVISIBLE
+            isSoundEffectsEnabled = false
             addView(response, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         }
         response.apply {
-            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setPadding(dp(4), dp(9), dp(4), dp(10))
             setLineSpacing(dp(2).toFloat(), 1f)
             setTextIsSelectable(true)
         }
-        addView(answerScroll, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) })
+        addView(answerScroll, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f).apply { bottomMargin = dp(6) })
 
         editor.apply {
             hint = "Сообщение или команда"
+            isSoundEffectsEnabled = false
             contentDescription = "Сообщение Кортексу"
             setHintTextColor(0xFFAAAAAA.toInt())
             setTextColor(Color.WHITE)
@@ -133,7 +127,7 @@ internal class IslandConversationPanel(
             setOnFocusChangeListener { _, focused ->
                 entry.focused = focused
                 entry.invalidate()
-                if (focused) onInteraction?.invoke(.33f)
+                onKeyboardFocus?.invoke(focused)
             }
             setOnEditorActionListener { _, action, event ->
                 val enter = event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN && !event.isShiftPressed
@@ -142,6 +136,14 @@ internal class IslandConversationPanel(
                     if (!busy) submit()
                     true
                 }
+            }
+            setOnTouchListener { _, event ->
+                if (event.actionMasked == MotionEvent.ACTION_UP && !hasFocus()) {
+                    onKeyboardFocus?.invoke(true)
+                    requestFocus()
+                    post { keyboard()?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT) }
+                }
+                false
             }
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -157,14 +159,17 @@ internal class IslandConversationPanel(
     }
 
     fun status(phase: String, label: String) {
-        signal.phase = phase
-        signal.invalidate()
+        if (signal.phase != phase) {
+            signal.phase = phase
+            signal.invalidate()
+        }
         val message = label.ifBlank { "На связи" }
         if (status.text.toString() == message) return
         status.text = message
     }
 
     fun animateSignal(animate: Boolean) {
+        if (motion == animate) return
         motion = animate
         signal.invalidate()
     }
@@ -184,13 +189,13 @@ internal class IslandConversationPanel(
         refreshSend()
     }
 
-    fun answer(value: String): Boolean {
-        if (answer == value) return false
+    fun answer(value: String) {
+        if (answer == value) return
         val wasEmpty = answer.isBlank()
         answer = value
         val hasAnswer = value.isNotBlank()
         response.text = value
-        answerScroll.visibility = if (hasAnswer) VISIBLE else GONE
+        answerScroll.visibility = if (hasAnswer) VISIBLE else INVISIBLE
         if (wasEmpty && hasAnswer) {
             answerScroll.scrollTo(0, 0)
             if (motion) {
@@ -201,13 +206,23 @@ internal class IslandConversationPanel(
                     .setInterpolator(android.view.animation.PathInterpolator(.18f, 1f, .32f, 1f)).start()
             }
         }
-        return true
+    }
+
+    fun reveal(progress: Float) {
+        val density = resources.displayMetrics.density
+        header.translationY = (1f - progress) * 5 * density
+        answerScroll.alpha = ((progress - .12f) / .88f).coerceIn(0f, 1f)
+        answerScroll.translationY = (1f - progress) * 8 * density
+        entry.alpha = ((progress - .28f) / .72f).coerceIn(0f, 1f)
+        entry.translationY = (1f - progress) * 9 * density
     }
 
     fun hideKeyboard() {
         if (!editor.hasFocus()) return
         keyboard()?.hideSoftInputFromWindow(windowToken, 0)
+        requestFocus()
         editor.clearFocus()
+        onKeyboardFocus?.invoke(false)
     }
 
     fun draft() = editor.text.toString()
@@ -218,7 +233,6 @@ internal class IslandConversationPanel(
         if (value.isEmpty()) return
         editor.text.clear()
         hideKeyboard()
-        onInteraction?.invoke(.8f)
         sendMessage(value)
     }
 
@@ -247,13 +261,14 @@ internal class IslandConversationPanel(
         init { importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }
 
         override fun onDraw(canvas: Canvas) {
-            val moving = motion && isShown && windowVisibility == VISIBLE && ValueAnimator.areAnimatorsEnabled()
+            val moving = motion && isShown && windowVisibility == VISIBLE &&
+                (phase == "listening" || phase == "executing")
             val now = SystemClock.uptimeMillis()
             val time = if (moving) (now % 720_000L) / 1000f else 0f
-            drawing.face(canvas, 14 * density, height / 2f, phase, time, 1f)
+            drawing.mark(canvas, 13 * density, height / 2f, 1f)
             drawing.wave(canvas, 47 * density, height / 2f, phase, time,
                 level * exp((levelAt - now) / 240f), 1f)
-            if (moving) postInvalidateDelayed(28)
+            if (moving) postInvalidateDelayed(33)
         }
     }
 
@@ -271,11 +286,11 @@ internal class IslandConversationPanel(
             val inset = .65f * density
             val radius = (height / 2f).coerceAtMost(29 * density)
             ink.style = Paint.Style.FILL
-            ink.color = if (focused) 0xFF252525.toInt() else 0xFF181818.toInt()
+            ink.color = if (focused) 0xFF101010.toInt() else Color.BLACK
             canvas.drawRoundRect(inset, inset, width - inset, height - inset, radius, radius, ink)
             ink.style = Paint.Style.STROKE
             ink.strokeWidth = density * .8f
-            ink.color = if (focused) 0xFF787878.toInt() else 0xFF383838.toInt()
+            ink.color = if (focused) 0xFFA0A0A0.toInt() else 0xFF333333.toInt()
             canvas.drawRoundRect(inset, inset, width - inset, height - inset, radius, radius, ink)
         }
     }
@@ -294,6 +309,7 @@ internal class IslandConversationPanel(
 
         init {
             isClickable = true
+            isSoundEffectsEnabled = false
             isFocusable = true
             contentDescription = label
         }
@@ -302,7 +318,6 @@ internal class IslandConversationPanel(
             if (isEnabled && motion && ValueAnimator.areAnimatorsEnabled()) {
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
-                        onInteraction?.invoke(.48f)
                         animate().scaleX(.85f).scaleY(.76f).setInterpolator(null).setDuration(95).start()
                     }
                     MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_UP -> {

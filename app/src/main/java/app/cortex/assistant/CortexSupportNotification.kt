@@ -15,7 +15,7 @@ import org.json.JSONArray
 
 internal object CortexSupportNotification {
     private const val JOB = 1053
-    private const val CHANNEL = "cortex-support"
+    private const val CHANNEL = "cortex-support-text"
     private val id = Regex("^[0-9a-fA-F-]{36}$")
     private fun preferences(context: Context) = context.getSharedPreferences("cortex-support", Context.MODE_PRIVATE)
     fun paused(context: Context) = context.getSharedPreferences("cortex-display", Context.MODE_PRIVATE)
@@ -47,7 +47,7 @@ internal object CortexSupportNotification {
             return
         }
         if (paused(context) || !prefs.getBoolean("enabled", false) || !manager.areNotificationsEnabled() || entries.all(known::contains)) return
-        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Ответы поддержки", NotificationManager.IMPORTANCE_DEFAULT))
+        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Ответы поддержки", NotificationManager.IMPORTANCE_LOW))
         if (manager.getNotificationChannel(CHANNEL)?.importance == NotificationManager.IMPORTANCE_NONE) return
         val open = PendingIntent.getActivity(context, 52, Intent(context, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)

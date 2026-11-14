@@ -38,7 +38,6 @@ const CortexIcons = (() => {
     bolt: '<path d="m13 2-9 12h7l-1 8 10-12h-7z"/>',
     message: '<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H4l1.5-4A8.5 8.5 0 1 1 21 11.5Z"/><path d="M8 12h.01m4 0h.01m4 0h.01"/>',
     mic: '<rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-3 0h6"/>',
-    speaker: '<path d="M3 9h4l5-4v14l-5-4H3zm12 0a4 4 0 0 1 0 6m2-9a8 8 0 0 1 0 12"/>',
     memory: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
     shield: '<path d="M12 2 4 6v6c0 5 4 8.5 8 10 4-1.5 8-5 8-10V6z"/><path d="m8.5 12 2.5 2.5 4.5-5"/>',
     grid: '<rect x="4" y="4" width="6" height="6" rx="1.3"/><rect x="14" y="4" width="6" height="6" rx="1.3"/><rect x="4" y="14" width="6" height="6" rx="1.3"/><rect x="14" y="14" width="6" height="6" rx="1.3"/>',

@@ -5,7 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.ceil
 
-internal class IslandAssistant(context: Context) : AutoCloseable {
+internal class IslandAssistant(private val context: Context) : AutoCloseable {
     private val gateway = CortexServerBridge(context)
     private val engine = CortexActionEngine(context)
     private val history = ArrayDeque<Pair<String, String>>()
@@ -25,12 +25,13 @@ internal class IslandAssistant(context: Context) : AutoCloseable {
             if (ok) remember(text, answer)
             finished(answer, ok)
         }
-        if (tools && engine.start(text, profile, beforeScreen = beforeScreen, progress = progress) { result ->
-                finish(result.text, result.ok)
+        if (engine.start(text, profile, allowPhone = tools, beforeScreen = beforeScreen, progress = progress) { result ->
+                if (turn == generation) finished(result.text, result.ok)
             }) return
         val messages = JSONArray().put(message("system",
-            "Ты CORTEX, голосовой помощник Android. Отвечай живо, по делу и на языке пользователя. " +
-                "Учитывай предыдущие реплики. В этом ответе ты ведёшь разговор и ничего не меняешь на телефоне."))
+            CortexDeviceContext.IDENTITY + " Ответь кратко и на языке пользователя. " +
+                "Это разговорный ответ. Утверждай, что действие выполнено, только если локальный движок уже его подтвердил. " +
+                "Возможности сейчас: " + CortexDeviceContext.runtime(context, CortexScreenService.connected, tools)))
         history.forEach { (input, output) -> messages.put(message("user", input)).put(message("assistant", output)) }
         messages.put(message("user", text))
         val route = if (profile == "deep") "deep" else "fast"
@@ -72,8 +73,8 @@ internal class IslandAssistant(context: Context) : AutoCloseable {
     }
 
     private fun remember(text: String, answer: String) {
-        history.addLast(text to answer.take(2200))
-        if (history.size > 5) history.removeFirst()
+        history.addLast(text.take(1600) to answer.take(1200))
+        if (history.size > 3) history.removeFirst()
     }
 
     private fun message(role: String, text: String) = JSONObject().put("role", role).put("content", text)

@@ -83,12 +83,5 @@ const CortexMarkdown = (() => {
 
   const render = value => parser.render(String(value ?? ""));
 
-  function spoken(value, fallback) {
-    const fragment = document.createElement("template");
-    fragment.innerHTML = render(value);
-    for (const block of fragment.content.querySelectorAll(".code-block, .task-check")) block.remove();
-    return fragment.content.textContent.replace(/\s+/gu, " ").trim() || fallback;
-  }
-
-  return { render, spoken, webUrl };
+  return { render, webUrl };
 })();

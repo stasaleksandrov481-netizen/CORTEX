@@ -2,6 +2,7 @@ package app.cortex.assistant
 
 import android.app.Activity
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -21,9 +22,8 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
         if (level != null) e.put("level", level)
         emit(e)
     }
-    private fun speech(id: String, phase: String) { emit(JSONObject().put("type", "speech").put("id", id).put("phase", phase)) }
 
-    fun listen(id: String, language: String) {
+    fun listen(id: String, language: String, preferOffline: Boolean) {
         stop()
         if (!SpeechRecognizer.isRecognitionAvailable(activity)) {
             voice(id, "error", "На устройстве нет доступного распознавания речи.")
@@ -31,14 +31,16 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
         }
         activeId = id
         CortexRuntime.recording = true
-        if (CortexRuntime.wakeHook != null) ui.postDelayed({ beginListening(id, language) }, 200)
-        else beginListening(id, language)
+        if (CortexRuntime.wakeHook != null) ui.postDelayed({ beginListening(id, language, preferOffline) }, 200)
+        else beginListening(id, language, preferOffline)
     }
 
-    private fun beginListening(id: String, language: String) {
+    private fun beginListening(id: String, language: String, preferOffline: Boolean) {
         if (activeId != id) return
         try {
-            val r = SpeechRecognizer.createSpeechRecognizer(activity)
+            val offline = preferOffline && Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(activity)
+            val r = if (offline && Build.VERSION.SDK_INT >= 31) SpeechRecognizer.createOnDeviceSpeechRecognizer(activity)
+                else SpeechRecognizer.createSpeechRecognizer(activity)
             recognizer = r
             r.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) = voice(id, "ready")
@@ -47,7 +49,15 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() = voice(id, "finishing")
                 override fun onError(error: Int) {
-                    if (activeId == id) { stop(); voice(id, "error", "Распознавание речи не завершилось. Попробуйте снова.") }
+                    if (activeId != id) return
+                    if (offline && error in OFFLINE_UNAVAILABLE) {
+                        recognizer?.destroy()
+                        recognizer = null
+                        ui.post { beginListening(id, language, false) }
+                        return
+                    }
+                    stop()
+                    voice(id, "error", "Распознавание речи не завершилось. Попробуйте снова.")
                 }
                 override fun onResults(results: Bundle?) {
                     if (activeId == id) {
@@ -65,6 +75,7 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
                 .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1_250L)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+                .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, offline)
             r.startListening(intent)
         } catch (_: Exception) {
             stop()
@@ -82,15 +93,13 @@ class CortexSpeech(private val activity: Activity, private val emit: (JSONObject
         CortexRuntime.recording = false
     }
 
-    fun speak(id: String, text: String, language: String, speed: Float) {
-        CortexVoiceOutput.speak(activity, this, id, text, language, speed) { phase -> speech(id, phase) }
+    private companion object {
+        val OFFLINE_UNAVAILABLE = setOf(SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE,
+            SpeechRecognizer.ERROR_SERVER, SpeechRecognizer.ERROR_CLIENT)
     }
-
-    fun silence(id: String?) = CortexVoiceOutput.silence(this, id)
 
     fun close() {
         stop()
-        silence(null)
         ui.removeCallbacksAndMessages(null)
     }
 }

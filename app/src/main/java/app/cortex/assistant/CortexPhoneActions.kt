@@ -358,7 +358,7 @@ internal class CortexPhoneActions(private val context: Context) {
             }
             "storage" -> { val f = android.os.StatFs(android.os.Environment.getDataDirectory().path)
                 done().put("free", f.availableBytes).put("total", f.totalBytes) }
-            "phone" -> done().put("value", Build.MANUFACTURER + " " + Build.MODEL)
+            "phone" -> done().put("value", Build.MANUFACTURER + " " + Build.MODEL + " · Android " + Build.VERSION.RELEASE)
             "ringer" -> done().put("value", when(audio.ringerMode) { AudioManager.RINGER_MODE_SILENT -> "silent"
                 AudioManager.RINGER_MODE_VIBRATE -> "vibrate"; else -> "sound" })
             "time" -> done().put("value", java.time.ZonedDateTime.now().toString())

@@ -23,6 +23,8 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Re-created Android host compatible with the web assets shipped in CORTEX 0.8.6.
  * Original Android Kotlin sources are not embedded in the distribution APK.
@@ -35,6 +37,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var island: CortexIslandBridge
     private lateinit var container: FrameLayout
     private var rendererFailed = false
+    private var nativeReady = false
+    private val wakeCommand: (String) -> Boolean = { command ->
+        val available = !rendererFailed && nativeReady && CortexRuntime.appVisible
+        if (available) deviceEvent(JSONObject().put("type", "wake-command").put("text", command))
+        available
+    }
     private val authTab = AuthTabIntent.registerActivityResultLauncher(this) { result ->
         val uri = result.resultUri
         if (result.resultCode == AuthTabIntent.RESULT_OK && uri != null) authReturned(uri)
@@ -43,7 +51,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (cleanupStarted.compareAndSet(false, true)) {
+            val context = applicationContext
+            Thread({
+                File(context.filesDir, "voices").deleteRecursively()
+                context.deleteSharedPreferences("cortex-voices")
+            }, "CortexStorageCleanup").start()
+        }
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.decorView.isSoundEffectsEnabled = false
         container = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val safeAreas = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime()
         ViewCompat.setOnApplyWindowInsetsListener(container) { view, insets ->
@@ -57,10 +73,12 @@ class MainActivity : ComponentActivity() {
 
     private fun createWebView(savedInstanceState: Bundle? = null) {
         rendererFailed = false
+        nativeReady = false
         val loader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this)).build()
         webView = WebView(this).apply {
             setBackgroundColor(Color.BLACK)
+            isSoundEffectsEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
             settings.apply {
                 javaScriptEnabled = true
@@ -97,9 +115,16 @@ class MainActivity : ComponentActivity() {
                 if (mainFrame && source.toString().trimEnd('/') == origin) server.handle(message.data.orEmpty(), reply)
             }
             WebViewCompat.addWebMessageListener(webView, "CortexDevice", setOf(origin)) { _, message, source, mainFrame, _ ->
-                if (mainFrame && source.toString().trimEnd('/') == origin) runOnUiThread { device.handle(message.data.orEmpty()) }
+                if (mainFrame && source.toString().trimEnd('/') == origin) runOnUiThread {
+                    val data = message.data.orEmpty()
+                    if (!nativeReady && runCatching { JSONObject(data).optString("operation") }.getOrNull() == "permissions") {
+                        nativeReady = true
+                    }
+                    device.handle(data)
+                }
             }
         }
+        CortexRuntime.wakeCommand = wakeCommand
         island = CortexIslandBridge(this, webView, "https://$ASSET_HOST")
         if (savedInstanceState == null || webView.restoreState(savedInstanceState) == null) {
             webView.loadUrl("https://$ASSET_HOST/assets/web/index.html?android=1")
@@ -123,6 +148,7 @@ class MainActivity : ComponentActivity() {
             }, LinearLayout.LayoutParams(-1, -2))
             addView(Button(this@MainActivity).apply {
                 text = "Повторить"
+                isSoundEffectsEnabled = false
                 setOnClickListener {
                     createWebView()
                     notifyVisibility(true)
@@ -223,6 +249,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun closeWebView() {
+        if (CortexRuntime.wakeCommand === wakeCommand) CortexRuntime.wakeCommand = null
+        nativeReady = false
         if (::speech.isInitialized) speech.close()
         if (::device.isInitialized) device.close()
         if (::server.isInitialized) server.close()
@@ -230,6 +258,7 @@ class MainActivity : ComponentActivity() {
         if (::webView.isInitialized) { (webView.parent as? FrameLayout)?.removeView(webView); webView.destroy() }
     }
     private companion object {
+        private val cleanupStarted = AtomicBoolean()
         const val ASSET_HOST = WebViewAssetLoader.DEFAULT_DOMAIN
     }
 }

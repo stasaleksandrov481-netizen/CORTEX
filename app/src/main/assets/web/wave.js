@@ -13,12 +13,12 @@ const CortexWave = (() => {
   let width = 0, height = 0, frame = 0, previous = 0, age = 0, clock = .92;
   let kind = "home", mode = "idle", quality = "balanced", still = false, running = false;
   let populated = false, energy = .42, level = 0, lastLevel = 0, amplitude = .42;
-  let average = 16.7, slowFrames = 0, adaptive = 0;
+  let average = 16.7, slowFrames = 0, adaptive = 0, lastPaint = 0;
 
   function arrange() {
     const rank = Math.min(2, ["full", "balanced", "simple"].indexOf(quality) + adaptive);
-    const rows = [31, 24, 15][Math.max(0, rank)];
-    const spacing = [6.5, 8.5, 12][Math.max(0, rank)];
+    const rows = [30, 22, 14][Math.max(0, rank)];
+    const spacing = [7, 9, 13][Math.max(0, rank)];
     const columns = Math.ceil(width * 1.46 / spacing);
     const count = rows * columns;
     const noise = Float32Array.from({length: count}, (_, i) => ((i * 73 + (i % 37) * 31) % 211) / 211);
@@ -33,37 +33,40 @@ const CortexWave = (() => {
     if (!grid) return;
     const blend = still ? 1 : 1 - Math.exp(-elapsed / 260);
     if (clock - lastLevel > .18) level *= Math.exp(-elapsed / 380);
-    const target = mode === "voice" ? .27 + .69 * level : mode === "speaking" ? .48 + .17 * Math.sin(clock * 7.4)
+    const target = mode === "voice" ? .27 + .69 * level
       : mode === "thinking" ? .68 : mode === "focus" ? .32 : .43;
     energy += (target - energy) * blend;
     amplitude += ((kind === "chat" ? .77 : 1) - amplitude) * blend;
     const { rows, columns, noise, x, y, slope } = grid;
     const scale = Math.min(height, width * 1.56);
     const alpha = (still ? 1 : .34 + .66 * smooth(age / .86)) * (populated ? .28 : 1);
-    const horizon = height * (kind === "chat" ? .53 : .56);
+    const horizon = height * (kind === "chat" ? .52 : .56);
     const pulseAge = pulseSource ? clamp((clock - pulseSource.time) / 1.05) : 1;
     const pulseDistance = Math.hypot(width, height) * .8 * pulseAge;
     const pulseGain = (1 - pulseAge) * (1 - pulseAge);
-    const a = .62 * clock, b = .29 * clock;
+    const a = .68 * clock, b = .34 * clock;
 
     ctx.clearRect(0, 0, width, height);
     ctx.lineCap = "round";
     for (let row = 0; row < rows; row++) {
       const depth = row / (rows - 1);
       const lane = depth - .5;
-      const perspective = 1.21 + lane * .48;
-      const reach = .112 + energy * .059;
+      const perspective = 1.24 + lane * .51;
+      const reach = .113 + energy * .083;
       const visibility = Math.sin(Math.PI * depth) ** .66 * alpha;
       let oldY = horizon;
       for (let column = 0; column < columns; column++) {
         const u = column / (columns - 1) - .5;
-        const swell = Math.sin(u * 6.2 - a + depth * 1.27 + .28 * Math.sin(b + u * 2.3));
-        const swell2 = Math.sin(u * 11.1 + b + 1.6 - depth * 2.8);
-        const chop = Math.sin(u * 19.2 - a * 1.63 + depth * 5.4);
-        const fold = (swell * reach + swell2 * .041 + chop * .014) * amplitude;
-        const spread = lane * (.35 + .06 * swell2);
-        const roll = u * (.081 + .022 * Math.cos(b));
-        x[column] = width * (.5 + u * perspective) + scale * (.040 * swell - lane * .058);
+        const phase = u * 7.1 - a + depth * 1.72;
+        const secondary = u * 11.7 + b + 1.6 - depth * 3.5;
+        const swell = Math.sin(phase);
+        const swell2 = Math.sin(secondary);
+        const detail = Math.sin(u * 18.6 - a * 1.4 + depth * 5.9);
+        const fold = (swell * reach + swell2 * .042 + detail * .013) * amplitude;
+        const spread = lane * (.28 + .075 * swell2);
+        const roll = u * (.14 + .03 * Math.cos(b));
+        const drift = Math.cos(phase) * reach * .29 + .022 * Math.cos(secondary);
+        x[column] = width * (.5 + u * perspective) + scale * (drift - lane * .12);
         let cy = horizon + scale * (fold + spread + roll);
         if (pulseSource && pulseAge < 1) {
           const distance = Math.hypot(x[column] - pulseSource.x, cy - pulseSource.y) - pulseDistance;
@@ -74,10 +77,10 @@ const CortexWave = (() => {
         slope[column] = cy - oldY;
         oldY = cy;
       }
-      const highlight = Math.exp(-((depth - .47 - .11 * Math.sin(b)) ** 2) / .018);
+      const highlight = Math.exp(-((depth - .53 - .12 * Math.sin(b)) ** 2) / .024);
       if (row % 3 === 0) {
         ctx.strokeStyle = shimmer;
-        ctx.globalAlpha = visibility * (.13 + .36 * highlight);
+        ctx.globalAlpha = visibility * (.10 + .34 * highlight);
         ctx.lineWidth = .65 + .58 * highlight;
         ctx.beginPath();
         ctx.moveTo(x[0], y[0]);
@@ -85,14 +88,14 @@ const CortexWave = (() => {
         ctx.stroke();
       }
       ctx.fillStyle = "#fff";
-      ctx.globalAlpha = visibility * (.21 + .34 * highlight);
+      ctx.globalAlpha = visibility * (.14 + .31 * highlight);
       ctx.beginPath();
       for (let column = 1; column < columns; column++) {
         const px = x[column], py = y[column];
         if (px < -2 || px > width + 2) continue;
         const fleck = noise[row * columns + column];
         const specular = clamp(.72 + slope[column] * -.07);
-        const size = (.33 + .68 * fleck + .39 * highlight) * (.62 + .5 * specular);
+        const size = (.31 + .62 * fleck + .49 * highlight) * (.62 + .5 * specular);
         ctx.moveTo(px + size, py);
         ctx.arc(px, py, size, 0, tau);
       }
@@ -132,7 +135,11 @@ const CortexWave = (() => {
       arrange();
     }
     if (pulseSource && clock - pulseSource.time >= 1.05) pulseSource = null;
-    paint(elapsed);
+    const interval = mode === "voice" || quality === "full" ? 0 : quality === "simple" ? 31 : 22;
+    if (now - lastPaint >= interval) {
+      paint(lastPaint ? Math.min(70, now - lastPaint) : elapsed);
+      lastPaint = now;
+    }
     frame = requestAnimationFrame(tick);
   }
 
@@ -140,12 +147,12 @@ const CortexWave = (() => {
     running = false;
     cancelAnimationFrame(frame);
     observer?.disconnect();
-    previous = 0;
+    previous = lastPaint = 0;
   }
 
   function visibilityChanged() {
     cancelAnimationFrame(frame);
-    previous = 0;
+    previous = lastPaint = 0;
     if (!document.hidden && window.cortexAppVisible !== false && running && !still) frame = requestAnimationFrame(tick);
   }
 

@@ -8,6 +8,7 @@ internal object CortexRuntime {
     var islandVisibility: (() -> Unit)? = null
     var islandTouchPassThrough: ((PointF?) -> Boolean)? = null
     var wakeLevel: ((Float) -> Unit)? = null
+    var wakeCommand: ((String) -> Boolean)? = null
     var shutdownListener: (() -> Unit)? = null
 
     fun setAppVisible(value: Boolean) {
@@ -25,15 +26,6 @@ internal object CortexRuntime {
             field = value
             wakeHook?.invoke()
         }
-
-    var speaking = false
-        set(value) {
-            if (field == value) return
-            field = value
-            wakeHook?.invoke()
-        }
-
-    val audioBusy get() = recording || speaking
 
     fun reportWake(value: String?) {
         if (wakeStatus == value) return

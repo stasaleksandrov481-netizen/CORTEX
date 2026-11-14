@@ -25,9 +25,6 @@ internal class CortexDeviceBridge(
     private val context get() = activity.applicationContext
     private val engineDelegate = lazy { CortexActionEngine(activity) }
     private val engine by engineDelegate
-    private val voices by lazy { VoiceStore.get(context) }
-    private var watchingVoices = false
-    private val voiceUpdates: (JSONObject) -> Unit = { emit(it) }
     private var pendingImage = false
     private var pendingExport: String? = null
 
@@ -48,6 +45,7 @@ internal class CortexDeviceBridge(
                         .put("ok", ok).put("resumable", resumable).put("external", !CortexRuntime.appVisible))
                 val handled = engine.start(body.optString("text"), body.optString("profile"),
                     force = body.optBoolean("force"), allowPhone = body.optBoolean("allowPhone", true),
+                    source = body.optString("source", "chat").take(100),
                     beforeScreen = { activity.moveTaskToBack(true) },
                     progress = { event("progress", it) }) { result ->
                     event("result", result.text, result.ok, result.resumable)
@@ -72,25 +70,10 @@ internal class CortexDeviceBridge(
                     emit(JSONObject().put("type", "voice").put("id", id).put("phase", "error")
                         .put("text", "Разрешите микрофон CORTEX в Android."))
                     requestPermission(Manifest.permission.RECORD_AUDIO)
-                } else speech.listen(id, body.optString("language", "ru-RU"))
+                } else speech.listen(id, body.optString("language", "ru-RU"), preferOffline = !body.optBoolean("dictation"))
             }
             "voice-finish" -> speech.finish(body.optString("id"))
             "voice-cancel" -> speech.cancel(body.optString("id"))
-            "voice-catalog" -> {
-                if (!watchingVoices) { watchingVoices = true; voices.watch(voiceUpdates) }
-                voices.refresh(body.optBoolean("force"))
-            }
-            "voice-install" -> voices.install(body.optString("id"))
-            "voice-select" -> voices.select(body.optString("id"))
-            "voice-remove" -> voices.remove(body.optString("id"))
-            "voice-config" -> {
-                val enabled = body.optBoolean("enabled", true)
-                voices.configure(enabled, body.optBoolean("readText"), body.optDouble("speed", 1.0).toFloat())
-                if (!enabled) CortexVoiceOutput.silence()
-            }
-            "speak" -> speech.speak(body.optString("id"), body.optString("text"),
-                body.optString("language", "ru-RU"), body.optDouble("speed", 1.0).toFloat())
-            "silence" -> speech.silence(body.optString("id").takeIf { it.isNotBlank() })
             "copy" -> {
                 val text = body.optString("text").take(200_000)
                 val ok = runCatching {
@@ -135,7 +118,6 @@ internal class CortexDeviceBridge(
     }
 
     override fun close() {
-        if (watchingVoices) voices.unwatch(voiceUpdates)
         if (engineDelegate.isInitialized()) engine.close()
     }
 
