@@ -67,10 +67,10 @@ jobs:
           if [[ -z "$CORTEX_KEYSTORE_B64" && -z "$CORTEX_STORE_PASSWORD" &&
                 -z "$CORTEX_KEY_ALIAS" && -z "$CORTEX_KEY_PASSWORD" ]]; then
             if [[ "$CORTEX_REQUIRE_PUBLISH" == 'true' ]]; then
-              echo "::error::Add the original CORTEX signing key to GitHub Actions secrets. See README.md or clear the publish option to test the build."
+              echo "::error::Add the permanent CORTEX signing key to GitHub Actions secrets. See README.md or clear the publish option to test the build."
               exit 1
             fi
-            echo "::notice::Build verified. APK publication requires the original CORTEX signing key."
+            echo "::notice::Build verified. APK publication requires the permanent CORTEX signing key."
             exit 0
           fi
           : "${CORTEX_KEYSTORE_B64:?Missing CORTEX_KEYSTORE_B64}"
@@ -86,10 +86,10 @@ jobs:
           gradle --no-daemon :app:assembleRelease
           apk=app/build/outputs/apk/release/app-release.apk
           apksigner="$ANDROID_HOME/build-tools/36.0.0/apksigner"
-          expected=ec0318f23ef85abe2b737401fd36e2e578bd96a7b89d4590ea419164a8c271c5
+          expected=dbb16c019e7ea145c7600fe9e8411f7b929ba77c05d21fdaac91ca333631a274
           actual=$("$apksigner" verify --print-certs "$apk" | awk '/^Signer #[0-9]+ certificate SHA-256 digest:/ { print $NF }')
           if [[ "$actual" != "$expected" ]]; then
-            echo "::error::The certificate does not match the published CORTEX 1.0.5 APK."
+            echo "::error::The APK certificate does not match the permanent CORTEX release certificate."
             exit 1
           fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
