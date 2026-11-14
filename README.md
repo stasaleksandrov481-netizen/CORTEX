@@ -16,11 +16,20 @@ CORTEX 1.0.6 использует общую очередь визуальных
 
 ### Подпись обновления
 
-Подписывайте сборку тем же хранилищем ключей, которым собрали установленный APK. В Android Studio откройте **Build → Generate Signed Bundle / APK → APK**, выберите прежний keystore и вариант `release`. Из командной строки задайте `CORTEX_KEYSTORE_FILE` (абсолютный путь), `CORTEX_STORE_PASSWORD`, `CORTEX_KEY_ALIAS` и `CORTEX_KEY_PASSWORD`, затем запустите `./gradlew :app:assembleRelease`. Для Preview добавьте `-PcortexPreview=true` и используйте ключ её предыдущей сборки.
+Для выпуска 1.0.6 и последующих версий используется постоянный сертификат CORTEX. Его SHA-256 — `dbb16c019e7ea145c7600fe9e8411f7b929ba77c05d21fdaac91ca333631a274`. GitHub проверяет отпечаток до публикации APK. Опубликованный APK 1.0.5 подписан другим сертификатом, поэтому при первом переходе с него требуется переустановка. Дальнейшие APK с этим ключом и повышенным `versionCode` устанавливаются как обновления.
 
-Сравните сертификаты старого и нового APK командой `apksigner verify --print-certs <путь-к-APK>`. Для опубликованного GitHub-релиза 1.0.5 отпечаток SHA-256 — `ec0318f23ef85abe2b737401fd36e2e578bd96a7b89d4590ea419164a8c271c5`.
+В **Settings → Secrets and variables → Actions** один раз добавьте четыре секрета из комплекта подписи для GitHub. Ключ и пароли храните отдельно от репозитория.
 
-Для автоматического выпуска в GitHub сохраните прежнее хранилище ключей в **Settings → Secrets and variables → Actions** как `CORTEX_KEYSTORE_B64` (содержимое файла в Base64). Добавьте `CORTEX_STORE_PASSWORD`, `CORTEX_KEY_ALIAS` и `CORTEX_KEY_PASSWORD`. В **Actions → CORTEX Android APK and Release → Run workflow** оставьте включённым `publish` для выпуска. При отсутствии ключа запуск сообщит об этом. Отключите `publish`, чтобы только проверить сборку и тесты. Обычный push в `main` публикует выпуск при настроенных ключах и совпадении сертификата. Хранилище ключей и пароли держите отдельно от исходников. Если оригинальный ключ утрачен, опубликованную APK с таким сертификатом Android обновить не сможет.
+| Секрет | Значение |
+| --- | --- |
+| `CORTEX_KEYSTORE_B64` | Содержимое хранилища ключей в Base64 |
+| `CORTEX_STORE_PASSWORD` | Пароль хранилища |
+| `CORTEX_KEY_ALIAS` | Имя ключа `cortex` |
+| `CORTEX_KEY_PASSWORD` | Пароль ключа |
+
+Для выпуска выберите **Actions → CORTEX Android APK and Release → Run workflow**, ветку `main` и включённый `publish`. Push в `main` с настроенными секретами тоже публикует выпуск. Чтобы только проверить сборку и тесты, отключите `publish` при ручном запуске.
+
+Для локальной сборки задайте `CORTEX_KEYSTORE_FILE` с абсолютным путём к хранилищу, `CORTEX_STORE_PASSWORD`, `CORTEX_KEY_ALIAS` и `CORTEX_KEY_PASSWORD`, затем выполните `./gradlew :app:assembleRelease`. Для уже установленной Preview используйте `-PcortexPreview=true` и ключ её предыдущей сборки.
 
 ## Управление экраном
 
