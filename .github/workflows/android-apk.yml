@@ -5,6 +5,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a signed update to GitHub Releases
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -15,7 +20,7 @@ concurrency:
 
 jobs:
   android:
-    name: Build CORTEX with Island
+    name: Build and verify CORTEX
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -45,31 +50,75 @@ jobs:
         with:
           gradle-version: '8.13'
 
-      - name: Assemble Android debug APK
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
+      - name: Build and test Android
+        run: gradle --no-daemon :app:assembleDebug :app:testDebugUnitTest
+
+      - name: Sign the CORTEX update
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        id: signing
+        shell: bash
+        env:
+          CORTEX_REQUIRE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
+          CORTEX_KEYSTORE_B64: ${{ secrets.CORTEX_KEYSTORE_B64 }}
+          CORTEX_STORE_PASSWORD: ${{ secrets.CORTEX_STORE_PASSWORD }}
+          CORTEX_KEY_ALIAS: ${{ secrets.CORTEX_KEY_ALIAS }}
+          CORTEX_KEY_PASSWORD: ${{ secrets.CORTEX_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$CORTEX_KEYSTORE_B64" && -z "$CORTEX_STORE_PASSWORD" &&
+                -z "$CORTEX_KEY_ALIAS" && -z "$CORTEX_KEY_PASSWORD" ]]; then
+            if [[ "$CORTEX_REQUIRE_PUBLISH" == 'true' ]]; then
+              echo "::error::Add the original CORTEX signing key to GitHub Actions secrets. See README.md or clear the publish option to test the build."
+              exit 1
+            fi
+            echo "::notice::Build verified. APK publication requires the original CORTEX signing key."
+            exit 0
+          fi
+          : "${CORTEX_KEYSTORE_B64:?Missing CORTEX_KEYSTORE_B64}"
+          : "${CORTEX_STORE_PASSWORD:?Missing CORTEX_STORE_PASSWORD}"
+          : "${CORTEX_KEY_ALIAS:?Missing CORTEX_KEY_ALIAS}"
+          : "${CORTEX_KEY_PASSWORD:?Missing CORTEX_KEY_PASSWORD}"
+          umask 077
+          CORTEX_KEYSTORE_FILE=$(mktemp "$RUNNER_TEMP/cortex-signing.XXXXXXXX")
+          export CORTEX_KEYSTORE_FILE
+          trap 'rm -f "$CORTEX_KEYSTORE_FILE"' EXIT
+          printf '%s' "$CORTEX_KEYSTORE_B64" | base64 --decode > "$CORTEX_KEYSTORE_FILE"
+          unset CORTEX_KEYSTORE_B64
+          gradle --no-daemon :app:assembleRelease
+          apk=app/build/outputs/apk/release/app-release.apk
+          apksigner="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          expected=ec0318f23ef85abe2b737401fd36e2e578bd96a7b89d4590ea419164a8c271c5
+          actual=$("$apksigner" verify --print-certs "$apk" | awk '/^Signer #[0-9]+ certificate SHA-256 digest:/ { print $NF }')
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::The certificate does not match the published CORTEX 1.0.5 APK."
+            exit 1
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
       - name: Prepare download
+        if: steps.signing.outputs.publish == 'true'
         id: apk
         shell: bash
         run: |
           version=$(sed -nE 's/^[[:space:]]*versionName = "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' app/build.gradle.kts)
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           mkdir -p release
-          test -s app/build/outputs/apk/debug/app-debug.apk
-          name="CORTEX-$version-debug.apk"
-          cp app/build/outputs/apk/debug/app-debug.apk "release/$name"
+          test -s app/build/outputs/apk/release/app-release.apk
+          name="CORTEX-$version.apk"
+          cp app/build/outputs/apk/release/app-release.apk "release/$name"
           (cd release && sha256sum "$name" > SHA256SUMS.txt)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
       - name: Save APK artifact
+        if: steps.signing.outputs.publish == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: CORTEX-${{ steps.apk.outputs.version }}-debug-APK
+          name: CORTEX-${{ steps.apk.outputs.version }}-APK
           path: release/
           if-no-files-found: error
 
       - name: Publish version with APK
+        if: steps.signing.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.apk.outputs.version }}
