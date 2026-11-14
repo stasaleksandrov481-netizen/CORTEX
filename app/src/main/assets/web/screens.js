@@ -3,7 +3,7 @@
 const CortexUI = (() => {
   const M = Cortex;
   const icon = CortexIcons;
-  const version = "1.0.3";
+  const version = "1.0.4";
   const tabs = [
     ["chat", "Чат", "message"], ["phone-tools", "Вызов", "bolt"], ["home", "Кортекс", ""],
     ["notes", "Заметки", "note"], ["profile", "Профиль", "user"]
@@ -73,7 +73,7 @@ const CortexUI = (() => {
         ${iconButton("stop", "Завершить запись", "voice-turn", "", "voice-control")}
         ${iconButton("close", "Закончить голосовой режим", "voice-close", "", "voice-close")}
       </div>
-      <textarea id="composer-input" name="message" aria-label="Сообщение" enterkeyhint="enter" rows="1" maxlength="6000"
+      <textarea id="composer-input" name="message" aria-label="Сообщение" rows="1" maxlength="6000"
         enterkeyhint="send"></textarea>
       <div class="composer-actions">
         <button class="composer-button mic-button" type="button" aria-label="Диктовать сообщение" ${attributes("dictate")}>${icon("mic", 21)}</button>
@@ -85,13 +85,12 @@ const CortexUI = (() => {
   }
 
   function home() {
-    return `<header class="home-header"><div class="brand">${sign}<span>CORTEX</span></div>
-        <span class="home-header-quiet" aria-hidden="true"><i></i><i></i><i></i></span></header>
+    return `<header class="home-header"><div class="brand">${sign}<span>CORTEX</span></div></header>
       <section class="home-hero" aria-labelledby="home-title">
         <div class="hero-core" data-home-core aria-hidden="true"><i class="core-halo"></i>
           <i class="core-orbit"></i><i class="core-orbit"></i><i class="core-orbit"></i>
           <i class="core-glass"></i>${sign}</div>
-        <div class="hero-copy"><h1 id="home-title">Чем помочь?</h1><p class="hero-subtitle">Опишите задачу или задайте вопрос.</p></div>
+        <div class="hero-copy"><h1 id="home-title">Чем помочь?</h1></div>
       </section>`;
   }
 
@@ -243,7 +242,8 @@ const CortexUI = (() => {
         <div class="island-demo" data-camera="${esc(ctx.islandCamera || "drop")}" aria-hidden="true">
           <div class="demo-pill"><span class="demo-rim"></span>
             <div class="demo-body">
-              <div class="demo-state"><span class="demo-wave"><i></i><i></i><i></i><i></i><i></i></span>
+              <div class="demo-state"><span class="demo-face">☺</span>
+                <span class="demo-wave"><i></i><i></i><i></i><i></i><i></i></span>
                 <span class="demo-text"><b>Слушаю…</b><b>Выполняю…</b><b>Готово</b></span>
               </div>
               <div class="demo-composer">
@@ -265,6 +265,10 @@ const CortexUI = (() => {
         ${group(switchRow("Не показывать в горизонтальных приложениях", "Например, во время игр и просмотра видео", p.hideLandscape, "hideLandscape") +
           switchRow("Визуальное управление", "Запускать задачи Android из чата и островка", p.phoneActions, "phoneActions") +
           voiceRow)}
+        <dl class="voice-commands">
+          <div><dt>«Кортекс, убери островок»</dt><dd>Скрыть до следующего вызова</dd></div>
+          <div><dt>«Кортекс, выключись»</dt><dd>Остановить задачу и фоновое прослушивание</dd></div>
+        </dl>
         ${group(tile("Разрешения и доступы", "Покажем назначение каждого разрешения", "shield", "go", "permissions") +
           tile("Управление экраном", "Примеры команд и остановка задач", "bolt", "go", "tool-list") +
           tile("Настроить заново", "Повторить пошаговую настройку", "sliders", "open-setup"))}

@@ -34,11 +34,17 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
         raw: String,
         profile: String,
         force: Boolean = false,
+        allowPhone: Boolean = true,
         beforeScreen: () -> Unit = {},
         progress: (String) -> Unit = {},
         finished: (Result) -> Unit
     ): Boolean {
         val text = raw.trim().take(2400)
+        CortexIslandService.handleControl(context, text)?.let {
+            finished(Result(it, true))
+            return true
+        }
+        if (!allowPhone) return false
         val resumeText = VisualRequest.isResume(text)
         val reply = saved?.takeIf { !resumeText && it.question.isNotBlank() && text.length <= 200 &&
             !VisualRequest.isAction(text) && !text.endsWith('?') }
@@ -77,7 +83,6 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
                 } else {
                     beforeScreen()
                     fun report(message: String) {
-                        service.showProgress(message, "executing")
                         CortexActionState.report(context, "executing", message)
                         progress(message)
                     }
@@ -99,7 +104,7 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
                 result = Result("Не удалось получить подтверждение Android." +
                     if (preserve) " Проверьте экран и продолжите задачу." else "", false, preserve)
             } finally {
-                service.stopTouch()
+                if (!result.ok) service.stopTouch()
                 if (preserve) {
                     val interrupted = task.inFlight
                     if (interrupted != null) {
@@ -111,9 +116,12 @@ internal class CortexActionEngine(context: Context) : AutoCloseable {
                     saved = task
                 }
                 job = null
-                val phase = if (result.ok) "done" else "error"
+                val phase = when {
+                    result.ok -> "done"
+                    result.text.startsWith("Задача остановлена") -> "stopped"
+                    else -> "error"
+                }
                 val status = if (result.ok) "Задача выполнена" else result.text.take(180)
-                service.showProgress(status, phase)
                 CortexActionState.log(context, if (result.ok) "Визуальная задача выполнена · шагов: ${task.completed}"
                     else "Визуальная задача прервана · шагов: ${task.completed}")
                 CortexActionState.report(context, phase, status)

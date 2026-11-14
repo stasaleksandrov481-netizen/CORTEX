@@ -27,9 +27,8 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
 internal class IslandConversationPanel(
     context: Context,
@@ -75,20 +74,20 @@ internal class IslandConversationPanel(
             letterSpacing = .18f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         }, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
-        wordmark.addView(signal, LayoutParams(dp(30), dp(14)).apply { marginStart = dp(8) })
+        wordmark.addView(signal, LayoutParams(dp(67), dp(26)).apply { marginStart = dp(7) })
         identity.addView(wordmark, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-        status.maxLines = 1
+        status.maxLines = 2
         status.ellipsize = TextUtils.TruncateAt.END
         status.text = "На связи"
         status.visibility = VISIBLE
         status.accessibilityLiveRegion = ACCESSIBILITY_LIVE_REGION_POLITE
         identity.addView(status, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = dp(3) })
-        header.addView(identity, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply { marginStart = dp(4) })
+        header.addView(identity, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(4) })
         header.addView(Glyph("open", "Открыть приложение").apply { setOnClickListener { openApp() } },
             LayoutParams(dp(39), dp(43)))
         header.addView(Glyph("close", "Свернуть островок").apply { setOnClickListener { close() } },
             LayoutParams(dp(39), dp(43)))
-        addView(header, LayoutParams(LayoutParams.MATCH_PARENT, dp(47)))
+        addView(header, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
 
         answerScroll.apply {
             isFillViewport = false
@@ -96,9 +95,9 @@ internal class IslandConversationPanel(
             overScrollMode = OVER_SCROLL_NEVER
             visibility = GONE
             background = GradientDrawable().apply {
-                setColor(0xFF111111.toInt())
+                setColor(0xFF191B23.toInt())
                 cornerRadius = dp(18).toFloat()
-                setStroke(dp(1), 0xFF2A2A2A.toInt())
+                setStroke(dp(1), 0xFF373A47.toInt())
             }
             addView(response, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         }
@@ -170,6 +169,12 @@ internal class IslandConversationPanel(
         signal.invalidate()
     }
 
+    fun audioLevel(level: Float) {
+        signal.level = level
+        signal.levelAt = SystemClock.uptimeMillis()
+        signal.invalidate()
+    }
+
     fun busy(active: Boolean) {
         if (busy == active) return
         busy = active
@@ -197,11 +202,6 @@ internal class IslandConversationPanel(
             }
         }
         return true
-    }
-
-    fun focusEditor() {
-        if (!isAttachedToWindow || !editor.requestFocus()) return
-        post { if (editor.hasFocus()) keyboard()?.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT) }
     }
 
     fun hideKeyboard() {
@@ -239,23 +239,21 @@ internal class IslandConversationPanel(
     }
 
     private inner class Signal : View(context) {
-        private val dot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+        private val drawing = IslandSignal(density)
         var phase = "idle"
+        var levelAt = 0L
+        var level = 0f
 
         init { importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }
 
         override fun onDraw(canvas: Canvas) {
             val moving = motion && isShown && windowVisibility == VISIBLE && ValueAnimator.areAnimatorsEnabled()
-            val time = if (moving) (SystemClock.uptimeMillis() % 16000) / 1000f else 0f
-            val speed = if (phase == "idle") 3.1f else 7.2f
-            val strength = if (phase == "listening") 3.6f else if (phase == "executing") 2.9f else 1.55f
-            for (i in -2..2) {
-                val wave = if (moving) sin(time * speed + i * .92f) else 0f
-                dot.alpha = (151 + 83 * (.5f + wave * .5f) - abs(i) * 12).roundToInt()
-                canvas.drawCircle(width / 2f + i * 4.9f * density, height / 2f + wave * strength * density,
-                    (1.38f + (2 - abs(i)) * .16f) * density, dot)
-            }
-            if (moving) postInvalidateDelayed(40)
+            val now = SystemClock.uptimeMillis()
+            val time = if (moving) (now % 720_000L) / 1000f else 0f
+            drawing.face(canvas, 14 * density, height / 2f, phase, time, 1f)
+            drawing.wave(canvas, 47 * density, height / 2f, phase, time,
+                level * exp((levelAt - now) / 240f), 1f)
+            if (moving) postInvalidateDelayed(28)
         }
     }
 
@@ -273,11 +271,11 @@ internal class IslandConversationPanel(
             val inset = .65f * density
             val radius = (height / 2f).coerceAtMost(29 * density)
             ink.style = Paint.Style.FILL
-            ink.color = if (focused) 0xFF181818.toInt() else 0xFF101010.toInt()
+            ink.color = if (focused) 0xFF222530.toInt() else 0xFF16181F.toInt()
             canvas.drawRoundRect(inset, inset, width - inset, height - inset, radius, radius, ink)
             ink.style = Paint.Style.STROKE
             ink.strokeWidth = density * .8f
-            ink.color = if (focused) 0xFF575757.toInt() else 0xFF292929.toInt()
+            ink.color = if (focused) 0xFF6F7892.toInt() else 0xFF353846.toInt()
             canvas.drawRoundRect(inset, inset, width - inset, height - inset, radius, radius, ink)
         }
     }

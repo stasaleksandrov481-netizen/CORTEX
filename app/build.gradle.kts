@@ -13,15 +13,15 @@ android {
         applicationId = "app.cortex.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 103
-        versionName = "1.0.3"
+        versionCode = 104
+        versionName = "1.0.4"
     }
     buildFeatures { buildConfig = true }
     buildTypes {
         debug {
             if (sideBySide.get()) {
-                applicationIdSuffix = ".preview.v103"
-                resValue("string", "app_name", "CORTEX Preview 1.0.3")
+                applicationIdSuffix = ".preview.v104"
+                resValue("string", "app_name", "CORTEX Preview 1.0.4")
             }
         }
         release {

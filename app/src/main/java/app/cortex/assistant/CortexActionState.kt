@@ -18,8 +18,12 @@ import java.util.UUID
 
 /** One phone task at a time, independent of which CORTEX surface started it. */
 internal object CortexActionState {
+    data class Status(val phase: String, val message: String, val at: Long = android.os.SystemClock.uptimeMillis())
+
     private var cancel: (() -> Unit)? = null
-    var listener: ((String, String) -> Unit)? = null
+    var status: Status? = null
+        private set
+    var listener: ((Status) -> Unit)? = null
     var gate = "open"
         private set
 
@@ -37,10 +41,13 @@ internal object CortexActionState {
     fun stop() { cancel?.invoke() }
 
     fun report(context: Context, phase: String, message: String) {
-        listener?.invoke(phase, message)
+        val active = phase == "executing"
+        if (!active) cancel = null
+        val next = Status(phase, message)
+        status = next
+        listener?.invoke(next)
         val manager = context.getSystemService(NotificationManager::class.java)
-        if (phase != "executing") {
-            cancel = null
+        if (!active) {
             manager.cancel(NOTIFICATION)
         } else if (manager.areNotificationsEnabled()) {
             manager.createNotificationChannel(NotificationChannel("cortex-actions", "Задачи CORTEX", NotificationManager.IMPORTANCE_LOW))

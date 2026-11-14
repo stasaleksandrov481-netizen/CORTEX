@@ -24,9 +24,9 @@ class CortexScreenService : AccessibilityService() {
     private var revision = 0L
     private var scrolledWindow = -1
     private var scrollRevision = 0L
+    private var scrollAxis: VisualScrollAxis? = null
     private var touch: VisualTouchOverlay? = null
     private var ocr: VisualOcr? = null
-    private var progress: VisualProgressOverlay? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -39,6 +39,15 @@ class CortexScreenService : AccessibilityService() {
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
                 scrolledWindow = event.windowId
                 scrollRevision = ++revision
+                val dx = if (Build.VERSION.SDK_INT >= 28) event.scrollDeltaX else 0
+                val dy = if (Build.VERSION.SDK_INT >= 28) event.scrollDeltaY else 0
+                scrollAxis = when {
+                    kotlin.math.abs(dx) > kotlin.math.abs(dy) -> VisualScrollAxis.HORIZONTAL
+                    kotlin.math.abs(dy) > kotlin.math.abs(dx) -> VisualScrollAxis.VERTICAL
+                    event.maxScrollX > 0 && event.maxScrollY <= 0 -> VisualScrollAxis.HORIZONTAL
+                    event.maxScrollY > 0 && event.maxScrollX <= 0 -> VisualScrollAxis.VERTICAL
+                    else -> null
+                }
             }
             AccessibilityEvent.TYPE_WINDOWS_CHANGED, AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> revision++
         }
@@ -51,7 +60,6 @@ class CortexScreenService : AccessibilityService() {
             connected = null
             CortexActionState.stop()
         }
-        progress?.close()
         touch?.close()
         super.onDestroy()
     }
@@ -92,7 +100,8 @@ class CortexScreenService : AccessibilityService() {
                             node.viewIdResourceName.orEmpty(), node.className?.toString()?.substringAfterLast('.').orEmpty(),
                             raw, node.isClickable, editable, scrollable, node.isFocused, checkable, node.isSelected,
                             enabled = node.isEnabled, description = description,
-                            state = if (Build.VERSION.SDK_INT >= 30) VisualLabels.clean(node.stateDescription) else "")
+                            state = if (Build.VERSION.SDK_INT >= 30) VisualLabels.clean(node.stateDescription) else "",
+                            scrollAxis = if (scrollable) node.scrollAxis() else null)
                     }
                 }
                 for (index in 0 until minOf(node.childCount, 100)) {
@@ -105,7 +114,8 @@ class CortexScreenService : AccessibilityService() {
             val secure = sensitive(root) || MANUAL_PACKAGES.matches(pkg)
             if (!secure) visit(root, emptyList(), 0)
             VisualFrame(pkg, root.windowId, frameBounds, nodes, secure, privateFields, revision,
-                if (root.windowId == scrolledWindow) scrollRevision else 0)
+                if (root.windowId == scrolledWindow) scrollRevision else 0,
+                if (root.windowId == scrolledWindow) scrollAxis else null)
         }
     }
 
@@ -116,11 +126,6 @@ class CortexScreenService : AccessibilityService() {
     }
 
     internal fun stopTouch() { touch?.clear() }
-
-    internal fun showProgress(message: String, phase: String) {
-        val overlay = progress ?: VisualProgressOverlay(this).also { progress = it }
-        overlay.show(message, phase)
-    }
 
     internal fun fieldMatches(frame: VisualFrame, node: VisualNode, value: String): Boolean =
         onNode(frame, node) { current -> current.isEditable && current.text?.toString() == value }
@@ -148,8 +153,6 @@ class CortexScreenService : AccessibilityService() {
 
     internal suspend fun tap(frame: VisualFrame, node: VisualNode): Boolean {
         val center = PointF(node.bounds.exactCenterX(), node.bounds.exactCenterY())
-        if (progress?.moveAwayFrom(center) == true) delay(140L)
-        if (progress?.contains(center) == true) return false
         if (node.ocr) {
             if (!isCurrent(frame) || revision != frame.revision) return false
         } else if (!onNode(frame, node) { it.isEnabled }) return false
@@ -168,33 +171,49 @@ class CortexScreenService : AccessibilityService() {
         it.performAction(if (direction == "down") AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
     }
 
-    internal suspend fun swipe(frame: VisualFrame, bounds: Rect, direction: String, fromEdge: Boolean = false): Boolean {
+    internal suspend fun swipe(
+        frame: VisualFrame, bounds: Rect, direction: String, fromEdge: Boolean = false, duration: Long = 340L
+    ): Boolean {
         val x = bounds.exactCenterX()
         val y = bounds.exactCenterY()
         val left = bounds.left + bounds.width() * .20f
         val right = bounds.right - bounds.width() * .20f
         val top = bounds.top + bounds.height() * .22f
-        val bottom = bounds.bottom - bounds.height() * (if (fromEdge) .07f else .22f)
+        val bottom = bounds.bottom - bounds.height() * (if (fromEdge) .085f else .16f)
         val (from, to) = when (direction) {
             "up" -> PointF(x, bottom) to PointF(x, top)
             "down" -> PointF(x, top) to PointF(x, bottom)
             "left" -> PointF(right, y) to PointF(left, y)
             else -> PointF(left, y) to PointF(right, y)
         }
-        if (progress?.moveAwayFrom(from) == true) delay(140L)
-        if (progress?.contains(from) == true) return false
-        return gesture(frame, from, to, 350L)
+        return gesture(frame, from, to, duration)
     }
 
     internal fun global(action: Int): Boolean = !locked() && performGlobalAction(action)
 
     private suspend fun gesture(frame: VisualFrame, from: PointF, to: PointF, duration: Long): Boolean {
         if (!isCurrent(frame)) return false
-        val path = Path().apply {
-            moveTo(from.x, from.y)
-            if (from != to) lineTo(to.x, to.y)
+        val touches = CortexRuntime.islandTouchPassThrough
+        val lowered = touches?.invoke(from) == true
+        try {
+            if (lowered) delay(48L)
+            if (!isCurrent(frame)) return false
+            val path = Path().apply {
+                moveTo(from.x, from.y)
+                if (from != to) {
+                    val dx = to.x - from.x
+                    val dy = to.y - from.y
+                    quadTo((from.x + to.x) / 2f - dy * .039f, (from.y + to.y) / 2f + dx * .039f, to.x, to.y)
+                }
+            }
+            return dispatchVisualGesture(path, from, duration)
+        } finally {
+            if (lowered) touches?.invoke(null)
         }
-        return suspendCancellableCoroutine { pending ->
+    }
+
+    private suspend fun dispatchVisualGesture(path: Path, from: PointF, duration: Long): Boolean =
+        suspendCancellableCoroutine { pending ->
             val request = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build()
             val accepted = dispatchGesture(request, object : GestureResultCallback() {
@@ -209,11 +228,10 @@ class CortexScreenService : AccessibilityService() {
             }, null)
             if (accepted) {
                 val indicator = touch ?: VisualTouchOverlay(this).also { touch = it }
-                indicator.show(from, to, duration)
+                val reduceMotion = getSharedPreferences("cortex-display", MODE_PRIVATE).getBoolean("reduceMotion", false)
+                indicator.show(path, from, duration, !reduceMotion)
             } else if (pending.isActive) pending.resume(false)
         }
-    }
-
     private fun isCurrent(frame: VisualFrame) = !locked() && withRoot {
         it.windowId == frame.window && it.packageName?.toString() == frame.pkg && !sensitive(it)
     } == true
@@ -249,7 +267,8 @@ class CortexScreenService : AccessibilityService() {
         val available = windows
         try {
             val type = available.firstOrNull { it.id == root?.windowId }?.type
-            if (root == null || type == AccessibilityWindowInfo.TYPE_INPUT_METHOD || type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) {
+            if (root == null || type == AccessibilityWindowInfo.TYPE_INPUT_METHOD || type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY ||
+                (type != AccessibilityWindowInfo.TYPE_APPLICATION && root.packageName?.toString() == packageName)) {
                 val active = available.firstOrNull { it.isFocused && it.type == AccessibilityWindowInfo.TYPE_APPLICATION }?.root
                     ?: available.firstOrNull { it.isActive && it.type == AccessibilityWindowInfo.TYPE_APPLICATION }?.root
                     ?: return null
@@ -282,6 +301,18 @@ class CortexScreenService : AccessibilityService() {
     }
 
     private fun AccessibilityNodeInfo.supports(action: Int) = actionList.any { it.id == action }
+
+    private fun AccessibilityNodeInfo.scrollAxis(): VisualScrollAxis? {
+        val horizontal = supports(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id) ||
+            supports(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id)
+        val vertical = supports(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id) ||
+            supports(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id)
+        return when {
+            horizontal && !vertical -> VisualScrollAxis.HORIZONTAL
+            vertical && !horizontal -> VisualScrollAxis.VERTICAL
+            else -> null
+        }
+    }
 
     private fun sensitive(node: AccessibilityNodeInfo) =
         node.isPassword || (Build.VERSION.SDK_INT >= 34 && node.isAccessibilityDataSensitive) ||

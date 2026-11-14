@@ -44,7 +44,8 @@ internal class CortexDeviceBridge(
                     emit(JSONObject().put("type", "action").put("id", id).put("phase", phase).put("text", text)
                         .put("ok", ok).put("resumable", resumable).put("external", !CortexRuntime.appVisible))
                 val handled = engine.start(body.optString("text"), body.optString("profile"),
-                    force = body.optBoolean("force"), beforeScreen = { activity.moveTaskToBack(true) },
+                    force = body.optBoolean("force"), allowPhone = body.optBoolean("allowPhone", true),
+                    beforeScreen = { activity.moveTaskToBack(true) },
                     progress = { event("progress", it) }) { result ->
                     event("result", result.text, result.ok, result.resumable)
                 }

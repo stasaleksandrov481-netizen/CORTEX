@@ -129,5 +129,27 @@ const CortexMotion = (() => {
     });
   }
 
-  return { wave, core };
+  function page(surface, direction, tab) {
+    const offset = tab ? 13 * direction : 0;
+    return surface.animate([
+      { opacity: .18, transform: `translate3d(${offset}px,12px,0) scale(.987,1.012)` },
+      { opacity: .95, transform: `translate3d(${-.12 * offset}px,-2px,0) scale(1.003,.996)`, offset: .64 },
+      { opacity: 1, transform: "none" }
+    ], { duration: tab ? 390 : 345, easing: "cubic-bezier(.24,.72,.24,1)" });
+  }
+
+  const presses = new WeakMap();
+  function press(control) {
+    if (typeof control.animate !== "function" || control.disabled) return;
+    presses.get(control)?.cancel();
+    const transform = getComputedStyle(control).transform;
+    const base = transform === "none" ? "" : transform + " ";
+    presses.set(control, control.animate([
+      { transform: base + "scale(.964,.94)" },
+      { transform: base + "scale(1.016,.988)", offset: .53 },
+      { transform }
+    ], { duration: 320, easing: "cubic-bezier(.18,.82,.25,1)" }));
+  }
+
+  return { wave, core, page, press };
 })();

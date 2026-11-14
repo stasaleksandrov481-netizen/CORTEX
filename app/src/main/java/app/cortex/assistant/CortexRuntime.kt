@@ -1,9 +1,14 @@
 package app.cortex.assistant
 
+import android.graphics.PointF
+
 internal object CortexRuntime {
     var appVisible = false
         private set
     var islandVisibility: (() -> Unit)? = null
+    var islandTouchPassThrough: ((PointF?) -> Boolean)? = null
+    var wakeLevel: ((Float) -> Unit)? = null
+    var shutdownListener: (() -> Unit)? = null
 
     fun setAppVisible(value: Boolean) {
         appVisible = value

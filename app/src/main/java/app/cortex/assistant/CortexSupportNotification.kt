@@ -18,14 +18,19 @@ internal object CortexSupportNotification {
     private const val CHANNEL = "cortex-support"
     private val id = Regex("^[0-9a-fA-F-]{36}$")
     private fun preferences(context: Context) = context.getSharedPreferences("cortex-support", Context.MODE_PRIVATE)
+    fun paused(context: Context) = context.getSharedPreferences("cortex-display", Context.MODE_PRIVATE)
+        .getBoolean(CortexIslandService.WAKE_PAUSED, false)
 
     fun configure(context: Context, enabled: Boolean) {
         preferences(context).edit().putBoolean("enabled", enabled).apply()
+        if (enabled) resume(context) else pause(context)
+    }
+
+    fun pause(context: Context) = context.getSystemService(JobScheduler::class.java).cancel(JOB)
+
+    fun resume(context: Context) {
+        if (paused(context) || !preferences(context).getBoolean("enabled", false)) return
         val jobs = context.getSystemService(JobScheduler::class.java)
-        if (!enabled) {
-            jobs.cancel(JOB)
-            return
-        }
         if (jobs.getPendingJob(JOB) == null) jobs.schedule(JobInfo.Builder(JOB, ComponentName(context, CortexSupportJob::class.java))
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setPeriodic(15 * 60 * 1000L).build())
     }
@@ -41,7 +46,7 @@ internal object CortexSupportNotification {
             manager.cancel(1052)
             return
         }
-        if (!prefs.getBoolean("enabled", false) || !manager.areNotificationsEnabled() || entries.all(known::contains)) return
+        if (paused(context) || !prefs.getBoolean("enabled", false) || !manager.areNotificationsEnabled() || entries.all(known::contains)) return
         manager.createNotificationChannel(NotificationChannel(CHANNEL, "Ответы поддержки", NotificationManager.IMPORTANCE_DEFAULT))
         if (manager.getNotificationChannel(CHANNEL)?.importance == NotificationManager.IMPORTANCE_NONE) return
         val open = PendingIntent.getActivity(context, 52, Intent(context, MainActivity::class.java),
@@ -63,6 +68,7 @@ class CortexSupportJob : JobService() {
     private var gateway: CortexServerBridge? = null
 
     override fun onStartJob(params: JobParameters): Boolean {
+        if (CortexSupportNotification.paused(applicationContext)) return false
         val server = CortexServerBridge(applicationContext)
         gateway = server
         server.inbox { outcome ->
@@ -82,7 +88,7 @@ class CortexSupportJob : JobService() {
     override fun onStopJob(params: JobParameters): Boolean {
         gateway?.close()
         gateway = null
-        return true
+        return !CortexSupportNotification.paused(applicationContext)
     }
 
     override fun onDestroy() {

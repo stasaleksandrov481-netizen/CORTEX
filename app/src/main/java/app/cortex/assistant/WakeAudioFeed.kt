@@ -12,11 +12,13 @@ import android.system.OsConstants
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.sqrt
 
 /** A single local microphone stream feeding the system's on-device recognizer. */
 internal class WakeAudioFeed private constructor(
     private val recorder: AudioRecord,
-    private val onFailure: () -> Unit
+    private val onFailure: () -> Unit,
+    private val onLevel: (Float) -> Unit
 ) : AutoCloseable {
     private val open = AtomicBoolean(true)
     private val connection = AtomicReference<Port?>()
@@ -52,9 +54,19 @@ internal class WakeAudioFeed private constructor(
             var previous: Port? = null
             var offset = 0
             var blockedFrames = 0
+            var levelFrame = 0
             while (open.get()) {
                 val count = recorder.read(chunk, 0, chunk.size, AudioRecord.READ_BLOCKING)
                 if (count <= 0) throw IOException("Microphone input ended: $count")
+                if (++levelFrame % 2 == 0) {
+                    var energy = 0.0
+                    for (i in 0 until count - 1 step 2) {
+                        val sample = (chunk[i + 1].toInt() shl 8) or (chunk[i].toInt() and 0xff)
+                        energy += sample.toDouble() * sample
+                    }
+                    val rms = sqrt(energy / (count / 2).coerceAtLeast(1)) / 32768.0
+                    onLevel((sqrt(rms) * 3.2).toFloat().coerceIn(0f, 1f))
+                }
                 val samples = chunk.copyOf(count)
                 val port = connection.get()
                 if (port !== previous) {
@@ -125,7 +137,7 @@ internal class WakeAudioFeed private constructor(
         private const val MAX_PENDING_FRAMES = 80
 
         @SuppressLint("MissingPermission") // The foreground service checks the microphone permission before starting.
-        fun start(onFailure: () -> Unit): WakeAudioFeed {
+        fun start(onFailure: () -> Unit, onLevel: (Float) -> Unit): WakeAudioFeed {
             val channel = AudioFormat.CHANNEL_IN_MONO
             val minimum = AudioRecord.getMinBufferSize(RATE, channel, ENCODING)
             if (minimum <= 0) throw IOException("Microphone format unavailable")
@@ -135,7 +147,7 @@ internal class WakeAudioFeed private constructor(
             try {
                 recorder.startRecording()
                 check(recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING)
-                return WakeAudioFeed(recorder, onFailure)
+                return WakeAudioFeed(recorder, onFailure, onLevel)
             } catch (error: Exception) {
                 recorder.release()
                 throw error

@@ -9,7 +9,8 @@ const CortexWave = (() => {
   };
   const tau = Math.PI * 2;
   const spacings = [8.7, 10.2, 12.0, 14.5, 17];
-  const colors = Array.from({ length: 14 }, (_, index) => "rgba(255,255,255," + ((index + 1) / 15).toFixed(3) + ")");
+  const colors = Array.from({ length: 14 }, (_, index) =>
+    `rgba(${166 + index * 6},${179 + index * 5},${208 + index * 3},${((index + 1) / 16).toFixed(3)})`);
 
   let field, ctx, host, observer, grid, pulseGrid;
   let width = 0, height = 0, frame = 0, previous = 0, age = 0, clock = 1.7;
@@ -80,8 +81,9 @@ const CortexWave = (() => {
 
     for (let column = 0; column < x.length; column++) {
       const u = x[column] / width;
-      crest[column] = midline + Math.sin(u * 5.9 - t * 1.17) * (.084 + energy * .10) +
-        Math.sin(u * 10.4 + t * .61 + .8) * .037;
+      const flow = u * 6.35 - t * 1.18 + .51 * Math.sin(u * 3.6 + t * .6);
+      crest[column] = midline + Math.sin(flow) * (.083 + energy * .10) +
+        Math.sin(u * 12.1 + t * .68 + .8) * .036;
       drift[column] = Math.cos(u * 8.1 + t * 1.35);
     }
     for (let row = 0, i = 0; row < y.length; row++) {
@@ -120,6 +122,27 @@ const CortexWave = (() => {
     }
 
     ctx.clearRect(0, 0, width, height);
+    if (ambient) {
+      const shimmer = ctx.createLinearGradient(0, 0, width, height * .22);
+      shimmer.addColorStop(0, "rgba(168,184,221,0)");
+      shimmer.addColorStop(.27, "rgba(168,184,221,.38)");
+      shimmer.addColorStop(.54, "rgba(228,237,255,.65)");
+      shimmer.addColorStop(.78, "rgba(153,180,227,.28)");
+      shimmer.addColorStop(1, "rgba(153,180,227,0)");
+      ctx.strokeStyle = shimmer;
+      for (let layer = 0; layer < 5; layer++) {
+        ctx.globalAlpha = bloom * entrance * (.46 - layer * .071);
+        ctx.lineWidth = layer === 0 ? 1.4 : .9;
+        ctx.beginPath();
+        for (let col = 0; col < x.length; col++) {
+          const yAt = height * crest[col] + layer * (4.1 + 2.2 * drift[col]);
+          if (col === 0) ctx.moveTo(x[col], yAt);
+          else ctx.lineTo(x[col], yAt);
+        }
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
     for (let band = 0; band < colors.length; band++) {
       ctx.beginPath();
       for (let i = 0; i < tones.length; i++) {

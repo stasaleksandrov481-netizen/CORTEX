@@ -4,6 +4,8 @@ import android.graphics.Rect
 import org.json.JSONArray
 import org.json.JSONObject
 
+internal enum class VisualScrollAxis { HORIZONTAL, VERTICAL }
+
 internal data class VisualNode(
     val id: String,
     val path: List<Int>,
@@ -20,7 +22,8 @@ internal data class VisualNode(
     val ocr: Boolean = false,
     val enabled: Boolean = true,
     val description: String = "",
-    val state: String = ""
+    val state: String = "",
+    val scrollAxis: VisualScrollAxis? = null
 )
 
 internal data class VisualFrame(
@@ -31,7 +34,8 @@ internal data class VisualFrame(
     val secure: Boolean = false,
     val hasPrivateFields: Boolean = false,
     val revision: Long = 0L,
-    val scrollRevision: Long = 0L
+    val scrollRevision: Long = 0L,
+    val scrollAxis: VisualScrollAxis? = null
 ) {
     val tree get() = nodes.filterNot(VisualNode::ocr)
 

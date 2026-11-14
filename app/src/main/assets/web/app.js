@@ -57,7 +57,7 @@
   function sendDevice(operation, data = {}) {
     const control = window.CortexIslandControl;
     const extended = new Set(["overlay-permission", "microphone-permission",
-      "overlay-config", "wake-config", "island-state", "island-options"]);
+      "overlay-config", "wake-config", "island-options"]);
     if (operation === "permissions" && control) {
       try { control.postMessage(JSON.stringify({ operation })); } catch {}
     }
@@ -272,8 +272,8 @@
     const intoChat = next === "chat" && previous === "home";
     const intoHome = next === "home";
     const switchesTab = rootTab(previous) !== rootTab(next);
-    if (animated && (switchesTab || intoChat || intoHome || newChat) && (route !== "chat" || (current()?.messages.length || 0) < 40)) {
-      fadeOldPage(switchesTab ? 225 : 190, intoChat);
+    if (animated && (route !== "chat" || (current()?.messages.length || 0) < 40)) {
+      fadeOldPage(switchesTab ? 165 : 130, intoChat);
     }
     route = next;
     if (next === "chat") chatId = id;
@@ -291,8 +291,7 @@
           { transform: `translate(${x}px,${y}px) scale(${title.w / to.w})` }, { transform: "none" }
         ], { duration: 460, easing: "cubic-bezier(.22,.74,.21,1)" });
       }
-      pageMotion = screen.animate([{ opacity: .34, transform: "translate3d(0,5px,0)" }, { opacity: 1, transform: "none" }],
-        { duration: intoChat || intoHome ? 380 : Wave.duration(295), easing: "cubic-bezier(.23,.68,.24,1)" });
+      pageMotion = Motion.page(screen, tabDirection, switchesTab);
       if (cinematic) playCore(source);
       else if (switchesTab) clearMorph = Motion.wave(app, source, tabDirection);
       if (newChat && origin) {
@@ -318,7 +317,11 @@
       chatId = M.chat(decoded)?.id || current()?.id || M.createChat().id;
     }
     render({ bottom: route === "chat" });
-    if (rootTab(previous) !== rootTab(route) && !reduced() && splash.hidden) clearMorph = Motion.wave(app);
+    if (previous !== route && !reduced() && splash.hidden && typeof screen.animate === "function") {
+      const switchesTab = rootTab(previous) !== rootTab(route);
+      pageMotion = Motion.page(screen, -1, switchesTab);
+      if (switchesTab) clearMorph = Motion.wave(app, null, -1);
+    }
     if (permissionsPage()) sendDevice("permissions");
   }
 
@@ -667,7 +670,7 @@
   }
 
   function nativeAction(job, text) {
-    if (!device || !S.preferences.phoneActions || job.explain || job.screen) return Promise.resolve(null);
+    if (!device || job.explain || job.screen) return Promise.resolve(null);
     const id = M.id("action");
     job.nativeRunning = true;
     return new Promise(resolve => {
@@ -697,7 +700,8 @@
         } else done(null);
       });
       job.controller.signal.addEventListener("abort", cancel, { once: true });
-      if (!sendDevice("action-start", { id, text, profile: S.preferences.model, force: job.force })) done(null);
+      if (!sendDevice("action-start", { id, text, profile: S.preferences.model, force: job.force,
+        allowPhone: S.preferences.phoneActions })) done(null);
     });
   }
 
@@ -723,7 +727,6 @@
       onStatus() {
         if (pending !== job) return;
         job.action = "Пробую резервную модель…";
-        if (S.preferences.overlayMode !== "off") sendDevice("island-state", { phase: "executing", message: job.action });
         if (activeChat(job)) render({ bottom: true });
       },
       onDelta(delta) {
@@ -1172,6 +1175,21 @@
       wakeState = message.message || "";
       if (route === "phone-tools") render();
     }
+    if (message.type === "wake-paused" || message.type === "wake-shutdown") {
+      if (S.preferences.hotwordEnabled) {
+        S.preferences.hotwordEnabled = false;
+        saved();
+        if (route === "phone-tools") render();
+      }
+      if (message.type === "wake-shutdown") {
+        closeVoice();
+        sendDevice("silence");
+        if (pending && !pending.nativeRunning) {
+          stopAnswer(false);
+          render();
+        }
+      }
+    }
     if (message.type === "wake-config" && !message.ok) {
       S.preferences.hotwordEnabled = false; saved(); render();
       flash(message.message || "Голосовая активация пока недоступна на этом устройстве.");
@@ -1309,7 +1327,7 @@
       preference("overlayMode", mode);
       if (!window.CortexIslandControl) {
         flash(mode === "off" ? "Плавающее окно выключено." : "Выбор сохранён. Островок работает только в Android-приложении.");
-      } else if (!sendDevice("overlay-config", { mode, hideLandscape: S.preferences.hideLandscape }))
+      } else if (!sendDevice("overlay-config", { mode, hideLandscape: S.preferences.hideLandscape, resume: true }))
         flash("Не удалось применить режим. Проверьте разрешения Android.");
     },
     "model-profile"(value) { if (Object.hasOwn(M.models, value)) preference("model", value); },
@@ -1378,6 +1396,11 @@
       }
     }
   };
+
+  document.addEventListener("click", event => {
+    const control = event.target.closest?.("button, summary");
+    if (control && !reduced()) Motion.press(control);
+  }, { capture: true });
 
   app.addEventListener("click", event => {
     const link = event.target.closest(".markdown a[href]");
@@ -1499,7 +1522,9 @@
   sendDevice("visual-privacy");
   syncIslandOptions();
   sendDevice("support-notify-config", { enabled: S.preferences.notifyReplies });
-  if (S.preferences.hotwordEnabled && S.preferences.overlayMode !== "off") sendDevice("wake-config", { enabled: true });
+  if (S.preferences.hotwordEnabled && S.preferences.overlayMode !== "off") {
+    sendDevice("wake-config", { enabled: true, restore: true });
+  }
   sendDevice("screen-context");
   connectionLoad = refreshConnection();
   restoreLogin();

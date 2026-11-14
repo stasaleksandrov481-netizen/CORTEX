@@ -41,8 +41,10 @@ class CortexWakeService : Service() {
     private val turn = CortexWakeTurn(
         listening = { CortexIslandService.send(this, CortexIslandService.ACTION_WAKE) },
         finished = { command ->
-            CortexIslandService.send(this, CortexIslandService.ACTION_SUBMIT) {
-                putExtra(CortexIslandService.EXTRA_MESSAGE, command)
+            if (CortexIslandService.handleControl(this, command) == null) {
+                CortexIslandService.send(this, CortexIslandService.ACTION_SUBMIT) {
+                    putExtra(CortexIslandService.EXTRA_MESSAGE, command)
+                }
             }
         },
         closed = { CortexIslandService.send(this, CortexIslandService.ACTION_WAKE_CLOSED) }
@@ -63,6 +65,10 @@ class CortexWakeService : Service() {
             if (Build.VERSION.SDK_INT >= 34) startForeground(2811, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             else startForeground(2811, notification)
         }.isSuccess
+        if (getSharedPreferences("cortex-display", MODE_PRIVATE).getBoolean(CortexIslandService.WAKE_PAUSED, false)) {
+            stopSelf()
+            return
+        }
         if (!started || Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(this) ||
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             CortexRuntime.reportWake("Android не запустил офлайн-распознавание. Проверьте доступ к микрофону.")
@@ -137,9 +143,14 @@ class CortexWakeService : Service() {
             val previous = feed
             val audio = previous ?: run {
                 val ticket = ++feedGeneration
-                WakeAudioFeed.start {
-                    ui.post { if (enabled && feed != null && ticket == feedGeneration) fallback() }
-                }.also { feed = it }
+                WakeAudioFeed.start(
+                    onFailure = {
+                        ui.post { if (enabled && feed != null && ticket == feedGeneration) fallback() }
+                    },
+                    onLevel = { level ->
+                        ui.post { if (enabled && ticket == feedGeneration) CortexRuntime.wakeLevel?.invoke(level) }
+                    }
+                ).also { feed = it }
             }
             val read = audio.connect(replay = previous != null)
             intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, read)
@@ -251,7 +262,9 @@ class CortexWakeService : Service() {
         }
 
         override fun onBeginningOfSpeech() = Unit
-        override fun onRmsChanged(rmsdB: Float) = Unit
+        override fun onRmsChanged(rmsdB: Float) {
+            if (!useStream && current()) CortexRuntime.wakeLevel?.invoke(((rmsdB + 1f) / 12f).coerceIn(0f, 1f))
+        }
         override fun onBufferReceived(buffer: ByteArray?) = Unit
         override fun onEndOfSpeech() = Unit
         override fun onEvent(eventType: Int, params: Bundle?) = Unit

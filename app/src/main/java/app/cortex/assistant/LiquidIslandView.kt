@@ -10,12 +10,14 @@ import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.Rect
+import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.SweepGradient
 import android.graphics.Typeface
 import android.os.SystemClock
+import android.text.Layout
+import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextUtils
 import android.util.TypedValue
@@ -25,6 +27,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.animation.LinearInterpolator
 import android.widget.FrameLayout
+import android.widget.TextView
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.exp
@@ -37,11 +40,12 @@ internal class LiquidIslandView(
     val conversation: IslandConversationPanel,
     private val onOpen: () -> Unit,
     private val onDismiss: () -> Unit,
-    private val onOpenApp: () -> Unit
+    private val onOpenApp: () -> Unit,
+    onStop: () -> Unit
 ) : FrameLayout(context) {
     private val density = resources.displayMetrics.density
     private var placement: IslandPlacement? = null
-    private val frame = Rect()
+    private val location = IntArray(2)
     private val compact = RectF()
     private val expanded = RectF()
     private val fromCompact = RectF()
@@ -60,11 +64,11 @@ internal class LiquidIslandView(
         strokeCap = Paint.Cap.ROUND
     }
     private val sheen = LinearGradient(0f, 0f, 0f, 1f,
-        intArrayOf(0xFF222222.toInt(), 0xFF0B0B0B.toInt(), 0xFF030303.toInt(), Color.BLACK),
-        floatArrayOf(0f, .16f, .48f, 1f), Shader.TileMode.CLAMP)
+        intArrayOf(0xFF30333C.toInt(), 0xFF17191F.toInt(), 0xFF0C0D12.toInt(), 0xFF15171D.toInt()),
+        floatArrayOf(0f, .27f, .74f, 1f), Shader.TileMode.CLAMP)
     private val rim = SweepGradient(0f, 0f, intArrayOf(
-        0xFF75F2F4.toInt(), 0xFF9FA9FF.toInt(), 0xFFD6A2FF.toInt(), 0xFFFF8AB2.toInt(),
-        0xFFFFD894.toInt(), 0xFFA6F7D9.toInt(), 0xFF75F2F4.toInt()
+        0xFFC2D6F3.toInt(), 0xFF858FA4.toInt(), 0xFFE1EDF9.toInt(), 0xFF7C8395.toInt(),
+        0xFFADB4C8.toInt(), 0xFFE5EDFA.toInt(), 0xFFC2D6F3.toInt()
     ), floatArrayOf(0f, .16f, .34f, .53f, .68f, .84f, 1f))
     private val reflection = LinearGradient(0f, 0f, 0f, 1f,
         intArrayOf(0x82FFFFFF.toInt(), 0x15FFFFFF, 0x00FFFFFF, 0x30FFFFFF),
@@ -74,9 +78,14 @@ internal class LiquidIslandView(
         textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 11.5f, resources.displayMetrics)
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     }
+    private val signal = IslandSignal(density)
+    private var audio = 0f
+    private var audioAt = 0L
     private var label = ""
-    private var drawnLabel = ""
+    val hasStatus get() = label.isNotEmpty()
+    private var textLayout: StaticLayout? = null
     private var lastLabelSpace = 0
+    private var stoppable = false
     private var phase = "idle"
     private var press = 0f
     private var progress = 0f
@@ -85,6 +94,12 @@ internal class LiquidIslandView(
     private var layoutAt = 0L
     private var animation: ValueAnimator? = null
     private var motion = true
+    private val stop = TextView(context).apply {
+        contentDescription = "Остановить задачу CORTEX"
+        isFocusable = true
+        visibility = INVISIBLE
+        setOnClickListener { onStop() }
+    }
     var haptics = true
 
     init {
@@ -99,9 +114,10 @@ internal class LiquidIslandView(
         conversation.visibility = INVISIBLE
         conversation.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         conversation.onInteraction = ::react
+        addView(stop, LayoutParams((46 * density).roundToInt(), (48 * density).roundToInt()))
     }
 
-    fun place(value: IslandPlacement, window: Rect, deform: Boolean = false) {
+    fun place(value: IslandPlacement, deform: Boolean = false) {
         val previous = placement
         val now = SystemClock.uptimeMillis()
         val changed = previous != null && (value.compact != previous.compact || value.panel != previous.panel)
@@ -110,36 +126,52 @@ internal class LiquidIslandView(
             fromCompact.set(compact)
             fromExpanded.set(expanded)
             layoutAt = now
-        } else if (changed && !deform) {
+        } else if (changed) {
             layoutAt = 0L
         }
         placement = value
-        frame.set(window)
         val panel = value.panel
-        val next = LayoutParams(panel.width().roundToInt(), panel.height().roundToInt()).apply {
-            leftMargin = (panel.left - frame.left).roundToInt()
-            topMargin = (panel.top - frame.top).roundToInt()
-        }
+        val next = LayoutParams(panel.width().roundToInt(), panel.height().roundToInt())
         val old = conversation.layoutParams as LayoutParams
-        if (next.width != old.width || next.height != old.height ||
-            next.leftMargin != old.leftMargin || next.topMargin != old.topMargin) {
+        if (next.width != old.width || next.height != old.height) {
             conversation.layoutParams = next
         }
         if (lastScreen !== value.screen) {
             lastScreen = value.screen
             prepareCamera(value)
         }
+        if (changed) requestLayout()
         invalidate()
     }
 
-    fun phase(value: String, message: String) {
-        if (phase == value && label == message) return
+    fun phase(value: String, message: String, canStop: Boolean) {
+        if (phase == value && label == message && stoppable == canStop) return
         if (phase != value && value != "idle") react(.55f)
         phase = value
         label = message
+        stoppable = canStop
+        stop.visibility = if (canStop) VISIBLE else INVISIBLE
         lastLabelSpace = 0
         contentDescription = if (label.isBlank()) "Островок CORTEX. Ввести команду." else "CORTEX. $label"
         invalidate()
+    }
+
+    fun audioLevel(level: Float) {
+        if (phase != "listening") return
+        val now = SystemClock.uptimeMillis()
+        audio = mix(audioLevelAt(now), level, .46f)
+        audioAt = now
+        conversation.audioLevel(audio)
+        invalidate()
+    }
+
+    private fun audioLevelAt(now: Long) = audio * exp((audioAt - now) / 240f)
+
+    fun windowContains(point: PointF): Boolean {
+        if (!isAttachedToWindow) return false
+        getLocationOnScreen(location)
+        return point.x >= location[0] && point.x < location[0] + width &&
+            point.y >= location[1] && point.y < location[1] + height
     }
 
     fun expand(open: Boolean, animate: Boolean, done: () -> Unit) {
@@ -154,7 +186,7 @@ internal class LiquidIslandView(
             return
         }
         animation = ValueAnimator.ofFloat(progress, target).apply {
-            duration = ((if (open) 620 else 490) * abs(target - progress)).toLong().coerceAtLeast(110)
+            duration = ((if (open) 540 else 420) * abs(target - progress)).toLong().coerceAtLeast(110)
             interpolator = LinearInterpolator()
             addUpdateListener { progress = it.animatedValue as Float; showContent() }
             addListener(object : AnimatorListenerAdapter() {
@@ -245,6 +277,19 @@ internal class LiquidIslandView(
         interpolate(fromExpanded, target.panel, fraction, expanded)
     }
 
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        getLocationOnScreen(location)
+        val geometry = placement ?: return
+        val panel = geometry.panel
+        val x = (panel.left - location[0]).roundToInt()
+        val y = (panel.top - location[1]).roundToInt()
+        conversation.layout(x, y, x + conversation.measuredWidth, y + conversation.measuredHeight)
+        val stopRight = (geometry.compact.right - location[0]).roundToInt()
+        val stopTop = (geometry.compact.centerY() - location[1] - stop.measuredHeight / 2f).roundToInt()
+        stop.layout(stopRight - stop.measuredWidth, stopTop, stopRight, stopTop + stop.measuredHeight)
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val geometry = placement ?: return
@@ -260,7 +305,7 @@ internal class LiquidIslandView(
         } else 0f
         val pinch = if (animate) sin(PI * (p / .29f).coerceIn(0f, 1f)).toFloat() else 0f
         val spill = if (animate) sin(PI * smooth(.18f, .95f, p)).toFloat() else 0f
-        val rebound = if (animate) sin(2 * PI * smooth(.69f, 1f, p)).toFloat() * (1 - p) else 0f
+        val rebound = if (animate) sin(2 * PI * smooth(.62f, 1f, p)).toFloat() * (1 - p) else 0f
         val idle = if (animate) sin(seconds * 2f) * .40f else 0f
         val wide = smooth(.08f, .77f, p)
         val down = smooth(.23f, .93f, p)
@@ -276,7 +321,8 @@ internal class LiquidIslandView(
         geometry.anchor?.takeIf { IslandPlacement.near(it, body, 76 * density) }?.let { attach(it, spill, impulse) }
 
         canvas.save()
-        canvas.translate(-frame.left.toFloat(), -frame.top.toFloat())
+        getLocationOnScreen(location)
+        canvas.translate(-location[0].toFloat(), -location[1].toFloat())
         if (!cutout.isEmpty) canvas.clipOutPath(cutout)
         matrix.setScale(1f, body.height().coerceAtLeast(1f))
         matrix.postTranslate(0f, body.top)
@@ -314,7 +360,7 @@ internal class LiquidIslandView(
         edge.shader = null
 
         val alpha = 1f - smooth(.06f, .42f, p)
-        if (alpha > 0f) drawSignal(canvas, seconds, alpha, animate)
+        if (alpha > 0f) drawSignal(canvas, seconds, alpha, audioLevelAt(now))
         canvas.restore()
         if (animate && animation?.isRunning != true) {
             val active = phase == "listening" || phase == "executing" || tick < .6f || isPressed || layoutAt > now - GEOMETRY_MS
@@ -323,12 +369,12 @@ internal class LiquidIslandView(
     }
 
     override fun dispatchDraw(canvas: Canvas) {
-        if (conversation.visibility != VISIBLE || surface.isEmpty) return
+        if (surface.isEmpty) return
         canvas.save()
-        canvas.translate(-frame.left.toFloat(), -frame.top.toFloat())
+        canvas.translate(-location[0].toFloat(), -location[1].toFloat())
         canvas.clipPath(surface)
         if (!cutout.isEmpty) canvas.clipOutPath(cutout)
-        canvas.translate(frame.left.toFloat(), frame.top.toFloat())
+        canvas.translate(location[0].toFloat(), location[1].toFloat())
         super.dispatchDraw(canvas)
         canvas.restore()
     }
@@ -380,32 +426,38 @@ internal class LiquidIslandView(
         surface.op(collar, Path.Op.UNION)
     }
 
-    private fun drawSignal(canvas: Canvas, time: Float, alpha: Float, moving: Boolean) {
-        val withLabel = label.isNotEmpty() && body.width() > 91 * density
-        val centerX = if (withLabel) body.left + 24 * density else body.centerX()
-        val centerY = compact.centerY() + press * density
-        val strength = when (phase) {
-            "listening" -> 4.3f
-            "executing" -> 3.0f
-            else -> 1.7f
+    private fun drawSignal(canvas: Canvas, time: Float, alpha: Float, level: Float) {
+        val withLabel = label.isNotEmpty() && body.width() > 95 * density
+        val centerX = if (withLabel) body.left + 25 * density else body.centerX() - 17 * density
+        val centerY = body.centerY()
+        signal.face(canvas, centerX, centerY, phase, time, alpha)
+        if (!withLabel) {
+            signal.wave(canvas, centerX + 32 * density, centerY, phase, time, level, alpha)
+            return
         }
-        for (index in -2..2) {
-            val falloff = 1f - abs(index) * .14f
-            val wave = if (moving) sin(time * (if (phase == "idle") 3f else 7f) + index * .87f) else 0f
-            fill.color = Color.WHITE
-            fill.alpha = (alpha * falloff * (160 + 89 * (.5f + wave * .5f))).roundToInt()
-            canvas.drawCircle(centerX + index * 5.3f * density, centerY + wave * strength * falloff * density,
-                (1.55f + .42f * falloff) * density, fill)
-        }
-        if (!withLabel) return
-        val space = (body.width() - 53 * density).roundToInt().coerceAtLeast(1)
+        val space = (body.width() - (if (stoppable) 94 else 61) * density).roundToInt().coerceAtLeast(1)
         if (space != lastLabelSpace) {
             lastLabelSpace = space
-            drawnLabel = TextUtils.ellipsize(label, labelPaint, space.toFloat(), TextUtils.TruncateAt.END).toString()
+            textLayout = StaticLayout.Builder.obtain(label, 0, label.length, labelPaint, space)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL).setIncludePad(false)
+                .setMaxLines(2).setEllipsize(TextUtils.TruncateAt.END).build()
         }
         labelPaint.alpha = (alpha * 239).roundToInt()
-        canvas.drawText(drawnLabel, body.left + 45 * density,
-            centerY - (labelPaint.ascent() + labelPaint.descent()) / 2f, labelPaint)
+        textLayout?.let { layout ->
+            canvas.save()
+            canvas.translate(body.left + 46 * density, centerY - layout.height / 2f)
+            layout.draw(canvas)
+            canvas.restore()
+        }
+        if (stoppable) {
+            val x = body.right - 22 * density
+            val radius = 4.2f * density
+            fill.color = 0xFFF7D0D9.toInt()
+            fill.alpha = (alpha * 29).roundToInt()
+            canvas.drawCircle(x, centerY, 14 * density, fill)
+            fill.alpha = (alpha * 244).roundToInt()
+            canvas.drawRoundRect(x - radius, centerY - radius, x + radius, centerY + radius, density, density, fill)
+        }
     }
 
     override fun onDetachedFromWindow() {
@@ -425,6 +477,6 @@ internal class LiquidIslandView(
         out.set(mix(a.left, b.left, at), mix(a.top, b.top, at), mix(a.right, b.right, at), mix(a.bottom, b.bottom, at))
 
     companion object {
-        const val GEOMETRY_MS = 260L
+        const val GEOMETRY_MS = 310L
     }
 }

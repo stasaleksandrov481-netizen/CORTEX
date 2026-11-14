@@ -19,8 +19,10 @@ class CortexIslandBridge(private val activity: Activity, private val web: WebVie
     private var reply: JavaScriptReplyProxy? = null
     private val prefs = activity.getSharedPreferences("cortex-display", Activity.MODE_PRIVATE)
     private val wakeListener: (String?) -> Unit = { status("wake-state", true, it.orEmpty()) }
+    private val shutdownListener: () -> Unit = { status("wake-shutdown", true, "") }
     init {
         CortexRuntime.wakeStatusListener = wakeListener
+        CortexRuntime.shutdownListener = shutdownListener
         if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
             WebViewCompat.addWebMessageListener(web, "CortexIslandControl", setOf(origin)) {
                 _, message, sourceOrigin, mainFrame, response ->
@@ -44,15 +46,21 @@ class CortexIslandBridge(private val activity: Activity, private val web: WebVie
                         val mode = objectValue.optString("mode", "off")
                         val hide = objectValue.optBoolean("hideLandscape", true)
                         if (mode !in setOf("always", "wake", "off")) return@addWebMessageListener
-                        prefs.edit().putString("mode", mode).putBoolean("hideLandscape", hide).apply()
+                        prefs.edit().putString("mode", mode).putBoolean("hideLandscape", hide).apply {
+                            if (objectValue.optBoolean("resume") && mode != "off") remove(CortexIslandService.WAKE_PAUSED)
+                        }.apply()
                         if (mode == "off") {
                             configureWake(false)
                             activity.stopService(Intent(activity, CortexIslandService::class.java))
+                        } else if (prefs.getBoolean(CortexIslandService.WAKE_PAUSED, false)) {
+                            refresh()
                         } else if (Settings.canDrawOverlays(activity)) {
+                            CortexSupportNotification.resume(activity)
                             val intent = Intent(activity, CortexIslandService::class.java).apply {
                                 action = CortexIslandService.ACTION_CONFIG
                                 putExtra(CortexIslandService.EXTRA_MODE, mode)
                                 putExtra(CortexIslandService.EXTRA_HIDE_LANDSCAPE, hide)
+                                putExtra(CortexIslandService.EXTRA_RESUME, objectValue.optBoolean("resume"))
                             }
                             runCatching { activity.startForegroundService(intent) }.onFailure {
                                 status("overlay-mode", false, "Android ограничил запуск островка")
@@ -65,20 +73,21 @@ class CortexIslandBridge(private val activity: Activity, private val web: WebVie
                             .putBoolean("phoneActions", objectValue.optBoolean("phoneActions", true))
                             .putBoolean("reduceMotion", objectValue.optBoolean("reduceMotion"))
                             .putBoolean("haptics", objectValue.optBoolean("haptics", true)).apply()
-                        if (prefs.getString("mode", "off") != "off" && Settings.canDrawOverlays(activity)) {
+                        if (!prefs.getBoolean(CortexIslandService.WAKE_PAUSED, false) &&
+                            prefs.getString("mode", "off") != "off" && Settings.canDrawOverlays(activity)) {
                             CortexIslandService.send(activity, CortexIslandService.ACTION_ENSURE)
                         }
                     }
-                    "wake-config" -> configureWake(objectValue.optBoolean("enabled"))
-                    "island-state" -> CortexIslandService.send(activity, CortexIslandService.ACTION_STATUS) {
-                        putExtra(CortexIslandService.EXTRA_PHASE, objectValue.optString("phase"))
-                        putExtra(CortexIslandService.EXTRA_MESSAGE, objectValue.optString("message").take(64))
-                    }
+                    "wake-config" -> configureWake(objectValue.optBoolean("enabled"), objectValue.optBoolean("restore"))
                 }
             }
         }
     }
-    private fun configureWake(enabled: Boolean) {
+    private fun configureWake(enabled: Boolean, restore: Boolean = false) {
+        if (restore && prefs.getBoolean(CortexIslandService.WAKE_PAUSED, false)) {
+            status("wake-paused", true, "")
+            return
+        }
         val intent = Intent(activity, CortexWakeService::class.java)
         if (!enabled) {
             activity.stopService(intent)
@@ -97,25 +106,29 @@ class CortexIslandBridge(private val activity: Activity, private val web: WebVie
             status("wake-config", false, problem)
             return
         }
-        ensureIsland()
         if (CortexRuntime.wakeHook == null) {
             runCatching { activity.startForegroundService(intent) }
-                .onFailure { status("wake-config", false, "Android ограничил запуск микрофона.") }
+                .onFailure { status("wake-config", false, "Android ограничил запуск микрофона."); return }
         }
+        prefs.edit().remove(CortexIslandService.WAKE_PAUSED).apply()
+        CortexSupportNotification.resume(activity)
+        ensureIsland()
     }
 
     fun close() {
         if (CortexRuntime.wakeStatusListener === wakeListener) CortexRuntime.wakeStatusListener = null
+        if (CortexRuntime.shutdownListener === shutdownListener) CortexRuntime.shutdownListener = null
         reply = null
     }
 
     private fun status(type: String, ok: Boolean, message: String) {
         runCatching { reply?.postMessage(JSONObject().put("type", type).put("ok", ok).put("message", message).toString()) }
     }
+
     /** Re-applies the saved island mode (e.g. after the user granted "display over other apps"). */
     fun ensureIsland() {
         val mode = prefs.getString("mode", "off") ?: "off"
-        if (mode == "off" || !Settings.canDrawOverlays(activity)) return
+        if (mode == "off" || prefs.getBoolean(CortexIslandService.WAKE_PAUSED, false) || !Settings.canDrawOverlays(activity)) return
         runCatching {
             activity.startForegroundService(Intent(activity, CortexIslandService::class.java).apply {
                 action = CortexIslandService.ACTION_ENSURE
@@ -140,6 +153,7 @@ class CortexIslandBridge(private val activity: Activity, private val web: WebVie
     }
 
     fun refresh() {
+        if (prefs.getBoolean(CortexIslandService.WAKE_PAUSED, false)) status("wake-paused", true, "")
         val audio = activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val notifications = Build.VERSION.SDK_INT < 33 || activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         runCatching { reply?.postMessage(JSONObject()
